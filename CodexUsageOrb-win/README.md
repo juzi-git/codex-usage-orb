@@ -1,5 +1,7 @@
 # Codex Usage Orb
 
+Double-click `CodexUsageOrb.exe` to run it. No installation is required.
+
 - Transparent, always-on-top desktop orb
 - Freely draggable with the mouse
 - Reads the latest local Codex rate-limit status every 5 seconds
@@ -22,3 +24,13 @@ The size, color, and window position are saved to `%LOCALAPPDATA%\CodexUsageOrb\
 The main percentage shows the lowest remaining value among all active Codex limit windows. This prevents a short-term limit from being overlooked when only the weekly limit is considered. The app reads the latest rate-limit status from local Codex sessions every 5 seconds. It does not read `auth.json`, upload data, or make network requests.
 
 If the orb displays `--`, complete at least one Codex conversation so Codex can write an up-to-date usage status. If a future Codex update changes the local state format, the parser may also need to be updated.
+
+## System Requirements
+
+Windows 10 or 11, with the Codex desktop app or Codex CLI installed and authenticated with a ChatGPT account.
+
+## Source Code
+
+`Program.cs` contains the complete source code. It uses the .NET Framework WPF components included with Windows and has no third-party dependencies.
+
+After modifying the source, exit any running orb instance, right-click `build.ps1`, and select **Run with PowerShell** to regenerate `CodexUsageOrb.exe`.
