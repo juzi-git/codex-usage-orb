@@ -166,6 +166,7 @@ namespace CodexUsageOrb
         public double Y { get; set; }
         public double Size { get; set; }
         public string Accent { get; set; }
+        public string Language { get; set; }
 
         public OrbSettings()
         {
@@ -173,11 +174,12 @@ namespace CodexUsageOrb
             Y = Double.NaN;
             Size = 168;
             Accent = "#61DC18";
+            Language = "en";
         }
 
         public OrbSettings Clone()
         {
-            return new OrbSettings { X = X, Y = Y, Size = Size, Accent = Accent };
+            return new OrbSettings { X = X, Y = Y, Size = Size, Accent = Accent, Language = Language };
         }
     }
 
@@ -213,6 +215,7 @@ namespace CodexUsageOrb
                     else if (pair[0] == "Y" && TryDouble(pair[1], out value)) settings.Y = value;
                     else if (pair[0] == "Size" && TryDouble(pair[1], out value)) settings.Size = Math.Max(50, Math.Min(300, value));
                     else if (pair[0] == "Accent" && Regex.IsMatch(pair[1], "^#[0-9A-Fa-f]{6}$")) settings.Accent = pair[1].ToUpperInvariant();
+                    else if (pair[0] == "Language" && (pair[1] == "en" || pair[1] == "zh")) settings.Language = pair[1];
                 }
             }
             catch (IOException) { }
@@ -230,7 +233,8 @@ namespace CodexUsageOrb
                     "X=" + settings.X.ToString(CultureInfo.InvariantCulture),
                     "Y=" + settings.Y.ToString(CultureInfo.InvariantCulture),
                     "Size=" + settings.Size.ToString(CultureInfo.InvariantCulture),
-                    "Accent=" + settings.Accent
+                    "Accent=" + settings.Accent,
+                    "Language=" + settings.Language
                 }));
             }
             catch (IOException) { }
@@ -247,7 +251,8 @@ namespace CodexUsageOrb
     {
         private readonly Action<OrbSettings> preview;
         private readonly TextBlock sizeValue;
-        private readonly Border colorPreview;
+        private readonly Dictionary<string, Button> presetButtons = new Dictionary<string, Button>(StringComparer.OrdinalIgnoreCase);
+        private readonly Button customColorButton;
         public OrbSettings Value { get; private set; }
 
         public AppearanceWindow(Window owner, OrbSettings initial, Action<OrbSettings> previewAction)
@@ -255,9 +260,10 @@ namespace CodexUsageOrb
             Owner = owner;
             Value = initial;
             preview = previewAction;
-            Title = "悬浮球外观设置";
-            Width = 370;
-            Height = 320;
+            bool chinese = Value.Language == "zh";
+            Title = chinese ? "悬浮球外观设置" : "Orb Appearance Settings";
+            Width = 350;
+            Height = 300;
             WindowStartupLocation = WindowStartupLocation.CenterOwner;
             ResizeMode = ResizeMode.NoResize;
             ShowInTaskbar = false;
@@ -265,22 +271,39 @@ namespace CodexUsageOrb
             FontFamily = new FontFamily("Microsoft YaHei UI");
             Background = new SolidColorBrush(Color.FromRgb(246, 248, 251));
 
-            Grid root = new Grid { Margin = new Thickness(22) };
+            Grid root = new Grid { Margin = new Thickness(18) };
             root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-            root.RowDefinitions.Add(new RowDefinition());
+            root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             Content = root;
 
-            TextBlock heading = new TextBlock { Text = "实时调整大小和颜色", FontSize = 18, FontWeight = FontWeights.SemiBold, Foreground = new SolidColorBrush(Color.FromRgb(28, 38, 52)) };
+            TextBlock heading = new TextBlock { Text = chinese ? "调整大小、颜色和语言" : "Adjust size, color, and language", FontSize = 17, FontWeight = FontWeights.SemiBold, Foreground = new SolidColorBrush(Color.FromRgb(28, 38, 52)) };
             root.Children.Add(heading);
 
-            Grid sizeRow = new Grid { Margin = new Thickness(0, 22, 0, 0) };
-            sizeRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(70) });
+            Grid languageRow = new Grid { Margin = new Thickness(0, 14, 0, 0) };
+            languageRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(76) });
+            languageRow.ColumnDefinitions.Add(new ColumnDefinition());
+            TextBlock languageLabel = new TextBlock { Text = chinese ? "语言" : "Language", VerticalAlignment = VerticalAlignment.Center, FontSize = 13 };
+            ComboBox languageBox = new ComboBox { Width = 140, HorizontalAlignment = HorizontalAlignment.Left };
+            ComboBoxItem englishItem = new ComboBoxItem { Content = "English", Tag = "en" };
+            ComboBoxItem chineseItem = new ComboBoxItem { Content = "中文", Tag = "zh" };
+            languageBox.Items.Add(englishItem);
+            languageBox.Items.Add(chineseItem);
+            languageBox.SelectedIndex = chinese ? 1 : 0;
+            Grid.SetColumn(languageBox, 1);
+            languageRow.Children.Add(languageLabel);
+            languageRow.Children.Add(languageBox);
+            Grid.SetRow(languageRow, 1);
+            root.Children.Add(languageRow);
+
+            Grid sizeRow = new Grid { Margin = new Thickness(0, 8, 0, 0) };
+            sizeRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(76) });
             sizeRow.ColumnDefinitions.Add(new ColumnDefinition());
-            sizeRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(58) });
-            TextBlock sizeLabel = new TextBlock { Text = "尺寸", VerticalAlignment = VerticalAlignment.Center, FontSize = 13 };
+            sizeRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(50) });
+            TextBlock sizeLabel = new TextBlock { Text = chinese ? "尺寸" : "Size", VerticalAlignment = VerticalAlignment.Center, FontSize = 13 };
             Slider sizeSlider = new Slider { Minimum = 50, Maximum = 300, Value = Value.Size, TickFrequency = 10, IsSnapToTickEnabled = true, VerticalAlignment = VerticalAlignment.Center };
             sizeValue = new TextBlock { Text = Math.Round(Value.Size) + " px", VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Right };
             Grid.SetColumn(sizeSlider, 1);
@@ -288,36 +311,53 @@ namespace CodexUsageOrb
             sizeRow.Children.Add(sizeLabel);
             sizeRow.Children.Add(sizeSlider);
             sizeRow.Children.Add(sizeValue);
-            Grid.SetRow(sizeRow, 1);
+            Grid.SetRow(sizeRow, 2);
             root.Children.Add(sizeRow);
 
-            TextBlock colorLabel = new TextBlock { Text = "主题颜色", Margin = new Thickness(0, 22, 0, 8), FontSize = 13 };
-            Grid.SetRow(colorLabel, 2);
+            TextBlock colorLabel = new TextBlock { Text = chinese ? "主题颜色" : "Theme color", Margin = new Thickness(0, 12, 0, 5), FontSize = 13 };
+            Grid.SetRow(colorLabel, 3);
             root.Children.Add(colorLabel);
 
             StackPanel colors = new StackPanel { Orientation = Orientation.Horizontal };
-            AddPreset(colors, "绿色", "#61DC18");
-            AddPreset(colors, "蓝色", "#37BEFF");
-            AddPreset(colors, "紫色", "#A970FF");
-            AddPreset(colors, "橙色", "#FF9F35");
-            Button custom = new Button { Content = "自定义…", Padding = new Thickness(10, 5, 10, 5), Margin = new Thickness(4, 0, 0, 0) };
-            custom.Click += OnCustomColor;
-            colors.Children.Add(custom);
-            colorPreview = new Border { Width = 30, Height = 30, CornerRadius = new CornerRadius(15), Margin = new Thickness(10, 0, 0, 0), BorderBrush = Brushes.White, BorderThickness = new Thickness(2), Background = BrushFromHex(Value.Accent) };
-            colors.Children.Add(colorPreview);
-            Grid.SetRow(colors, 3);
+            AddPreset(colors, chinese ? "绿色" : "Green", "#61DC18");
+            AddPreset(colors, chinese ? "蓝色" : "Blue", "#37BEFF");
+            AddPreset(colors, chinese ? "紫色" : "Purple", "#A970FF");
+            AddPreset(colors, chinese ? "橙色" : "Orange", "#FF9F35");
+            customColorButton = new Button
+            {
+                Width = 42,
+                Height = 42,
+                Content = "+",
+                FontSize = 22,
+                FontWeight = FontWeights.Bold,
+                Padding = new Thickness(0),
+                Margin = new Thickness(3),
+                Background = new SolidColorBrush(Color.FromRgb(218, 218, 218)),
+                Foreground = new SolidColorBrush(Color.FromRgb(28, 38, 52)),
+                BorderBrush = Brushes.Transparent,
+                BorderThickness = new Thickness(3),
+                ToolTip = chinese ? "自定义颜色" : "Custom color"
+            };
+            customColorButton.Click += OnCustomColor;
+            colors.Children.Add(customColorButton);
+            Grid.SetRow(colors, 4);
             root.Children.Add(colors);
 
-            StackPanel footer = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 24, 0, 0) };
-            Button reset = new Button { Content = "恢复默认", Padding = new Thickness(12, 6, 12, 6), Margin = new Thickness(0, 0, 50, 0) };
-            reset.Click += delegate { Value.Size = 168; Value.Accent = "#61DC18"; sizeSlider.Value = 168; ApplyPreview(); };
-            Button cancel = new Button { Content = "取消", Width = 72, Padding = new Thickness(0, 6, 0, 6), Margin = new Thickness(0, 0, 8, 0), IsCancel = true };
-            Button ok = new Button { Content = "确定", Width = 72, Padding = new Thickness(0, 6, 0, 6), IsDefault = true };
+            Grid footer = new Grid { Margin = new Thickness(0, 18, 0, 0) };
+            footer.ColumnDefinitions.Add(new ColumnDefinition());
+            footer.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            Button reset = new Button { Content = chinese ? "恢复默认" : "Reset", Width = 70, Height = 30, HorizontalAlignment = HorizontalAlignment.Left };
+            reset.Click += delegate { Value.Size = 168; Value.Accent = "#61DC18"; Value.Language = "en"; sizeSlider.Value = 168; languageBox.SelectedIndex = 0; ApplyPreview(); };
+            StackPanel actions = new StackPanel { Orientation = Orientation.Horizontal };
+            Button cancel = new Button { Content = chinese ? "取消" : "Cancel", Width = 70, Height = 30, Margin = new Thickness(0, 0, 8, 0), IsCancel = true };
+            Button ok = new Button { Content = chinese ? "确定" : "OK", Width = 70, Height = 30, IsDefault = true };
             ok.Click += delegate { DialogResult = true; };
             footer.Children.Add(reset);
-            footer.Children.Add(cancel);
-            footer.Children.Add(ok);
-            Grid.SetRow(footer, 4);
+            actions.Children.Add(cancel);
+            actions.Children.Add(ok);
+            Grid.SetColumn(actions, 1);
+            footer.Children.Add(actions);
+            Grid.SetRow(footer, 5);
             root.Children.Add(footer);
 
             sizeSlider.ValueChanged += delegate
@@ -326,25 +366,40 @@ namespace CodexUsageOrb
                 sizeValue.Text = Math.Round(Value.Size) + " px";
                 ApplyPreview();
             };
+            languageBox.SelectionChanged += delegate
+            {
+                ComboBoxItem selected = languageBox.SelectedItem as ComboBoxItem;
+                if (selected == null) return;
+                Value.Language = (string)selected.Tag;
+                ApplyPreview();
+            };
+            UpdateColorSelection();
         }
 
         private void AddPreset(Panel parent, string name, string hex)
         {
             Button button = new Button
             {
-                Content = name,
+                Width = 42,
+                Height = 42,
+                Content = "",
                 Tag = hex,
                 Foreground = Brushes.White,
                 Background = BrushFromHex(hex),
-                BorderThickness = new Thickness(0),
-                Padding = new Thickness(10, 5, 10, 5),
-                Margin = new Thickness(0, 0, 5, 0)
+                BorderBrush = Brushes.Transparent,
+                BorderThickness = new Thickness(3),
+                FontSize = 20,
+                FontWeight = FontWeights.Bold,
+                Padding = new Thickness(0),
+                Margin = new Thickness(3),
+                ToolTip = name
             };
             button.Click += delegate
             {
                 Value.Accent = (string)button.Tag;
                 ApplyPreview();
             };
+            presetButtons[hex] = button;
             parent.Children.Add(button);
         }
 
@@ -363,8 +418,40 @@ namespace CodexUsageOrb
 
         private void ApplyPreview()
         {
-            colorPreview.Background = BrushFromHex(Value.Accent);
+            UpdateColorSelection();
             preview(Value.Clone());
+        }
+
+        private void UpdateColorSelection()
+        {
+            bool presetSelected = false;
+            foreach (KeyValuePair<string, Button> item in presetButtons)
+            {
+                bool selected = String.Equals(item.Key, Value.Accent, StringComparison.OrdinalIgnoreCase);
+                if (selected) presetSelected = true;
+                item.Value.Content = selected ? "✓" : "";
+                item.Value.BorderBrush = selected
+                    ? new SolidColorBrush(Color.FromRgb(28, 38, 52))
+                    : Brushes.Transparent;
+            }
+
+            bool customSelected = !presetSelected;
+            customColorButton.Content = customSelected ? "✓" : "+";
+            customColorButton.Background = customSelected
+                ? BrushFromHex(Value.Accent)
+                : new SolidColorBrush(Color.FromRgb(218, 218, 218));
+            customColorButton.Foreground = customSelected
+                ? ContrastBrush(ColorFromHex(Value.Accent))
+                : new SolidColorBrush(Color.FromRgb(28, 38, 52));
+            customColorButton.BorderBrush = customSelected
+                ? new SolidColorBrush(Color.FromRgb(28, 38, 52))
+                : Brushes.Transparent;
+        }
+
+        private static Brush ContrastBrush(Color color)
+        {
+            double luminance = (0.299 * color.R) + (0.587 * color.G) + (0.114 * color.B);
+            return luminance > 150 ? Brushes.Black : Brushes.White;
         }
 
         internal static Color ColorFromHex(string hex)
@@ -394,16 +481,18 @@ namespace CodexUsageOrb
         private readonly ToolTip detailTip;
         private readonly System.Windows.Threading.DispatcherTimer refreshTimer;
         private readonly System.Windows.Threading.DispatcherTimer waveTimer;
-        private readonly MenuItem startupItem;
+        private MenuItem startupItem;
         private OrbSettings settings;
         private UsageSnapshot snapshot;
+        private string displayedLanguage;
         private double phase;
         private bool refreshRunning;
 
         public OrbWindow()
         {
             settings = settingsStore.Load();
-            Title = "Codex 剩余用量";
+            displayedLanguage = settings.Language;
+            Title = Text(settings.Language, "Codex Usage Orb", "Codex 用量悬浮球");
             Width = settings.Size;
             Height = settings.Size;
             AllowsTransparency = true;
@@ -451,7 +540,7 @@ namespace CodexUsageOrb
             };
             subtitleText = new TextBlock
             {
-                Text = "正在读取", Foreground = new SolidColorBrush(Color.FromArgb(220, 235, 255, 229)),
+                Text = Text(settings.Language, "Loading", "正在读取"), Foreground = new SolidColorBrush(Color.FromArgb(220, 235, 255, 229)),
                 FontFamily = new FontFamily("Microsoft YaHei UI"), FontSize = 10, TextAlignment = TextAlignment.Center,
                 Margin = new Thickness(0, -2, 0, 0)
             };
@@ -462,10 +551,11 @@ namespace CodexUsageOrb
 
             detailTip = new ToolTip { Placement = System.Windows.Controls.Primitives.PlacementMode.Left };
             ToolTip = detailTip;
-            ContextMenu = BuildContextMenu();
+            ContextMenu = BuildContextMenu(settings.Language);
             startupItem = (MenuItem)ContextMenu.Items[4];
             startupItem.IsCheckable = true;
             startupItem.IsChecked = IsStartupEnabled();
+            ApplyLanguage(settings.Language);
 
             MouseLeftButtonDown += OnMouseLeftButtonDown;
             MouseDoubleClick += delegate { RefreshNow(); };
@@ -484,19 +574,19 @@ namespace CodexUsageOrb
             waveTimer.Tick += delegate { phase += 0.10; DrawWaves(); };
         }
 
-        private ContextMenu BuildContextMenu()
+        private ContextMenu BuildContextMenu(string language)
         {
             ContextMenu menu = new ContextMenu { FontFamily = new FontFamily("Microsoft YaHei UI") };
-            MenuItem title = new MenuItem { Header = "Codex 用量悬浮球", IsEnabled = false, FontWeight = FontWeights.Bold };
-            MenuItem refresh = new MenuItem { Header = "立即刷新" };
+            MenuItem title = new MenuItem { Header = Text(language, "Codex Usage Orb", "Codex 用量悬浮球"), IsEnabled = false, FontWeight = FontWeights.Bold };
+            MenuItem refresh = new MenuItem { Header = Text(language, "Refresh now", "立即刷新") };
             refresh.Click += delegate { RefreshNow(); };
-            MenuItem details = new MenuItem { Header = "查看详细信息" };
+            MenuItem details = new MenuItem { Header = Text(language, "View details", "查看详细信息") };
             details.Click += delegate { detailTip.IsOpen = true; };
-            MenuItem appearance = new MenuItem { Header = "外观设置…" };
+            MenuItem appearance = new MenuItem { Header = Text(language, "Appearance settings…", "外观设置…") };
             appearance.Click += OnAppearanceClick;
-            MenuItem startup = new MenuItem { Header = "开机自动启动" };
+            MenuItem startup = new MenuItem { Header = Text(language, "Launch at startup", "开机自动启动") };
             startup.Click += OnStartupClick;
-            MenuItem exit = new MenuItem { Header = "退出" };
+            MenuItem exit = new MenuItem { Header = Text(language, "Quit", "退出") };
             exit.Click += delegate { Close(); };
             menu.Items.Add(title);
             menu.Items.Add(refresh);
@@ -545,49 +635,62 @@ namespace CodexUsageOrb
             if (snapshot == null)
             {
                 percentText.Text = "--";
-                subtitleText.Text = "暂无数据";
-                detailTip.Content = "尚未找到 Codex 用量数据。\n请先在 Codex 中完成一次对话。";
+                subtitleText.Text = Text(displayedLanguage, "No data", "暂无数据");
+                detailTip.Content = Text(displayedLanguage,
+                    "No Codex usage data was found.\nComplete at least one Codex conversation first.",
+                    "尚未找到 Codex 用量数据。\n请先在 Codex 中完成一次对话。");
                 return;
             }
 
             double remaining = snapshot.RemainingPercent;
             percentText.Text = Math.Round(remaining).ToString("0", CultureInfo.InvariantCulture) + "%";
             LimitWindow active = snapshot.Windows.OrderBy(x => x.RemainingPercent).First();
-            subtitleText.Text = WindowName(active.WindowMinutes) + "剩余";
+            subtitleText.Text = Text(displayedLanguage,
+                WindowName(active.WindowMinutes, displayedLanguage) + " remaining",
+                WindowName(active.WindowMinutes, displayedLanguage) + "剩余");
             percentText.Foreground = remaining <= 15 ? new SolidColorBrush(Color.FromRgb(255, 238, 225)) : Brushes.White;
-            detailTip.Content = BuildDetails(snapshot);
+            detailTip.Content = BuildDetails(snapshot, displayedLanguage);
             DrawWaves();
         }
 
-        private static string BuildDetails(UsageSnapshot value)
+        private static string BuildDetails(UsageSnapshot value, string language)
         {
             StringBuilder text = new StringBuilder();
-            text.AppendLine("Codex 剩余用量");
+            text.AppendLine(Text(language, "Codex remaining usage", "Codex 剩余用量"));
             foreach (LimitWindow window in value.Windows.OrderBy(x => x.WindowMinutes))
             {
                 DateTime reset = DateTimeOffset.FromUnixTimeSeconds(window.ResetsAt).LocalDateTime;
-                text.Append(WindowName(window.WindowMinutes)).Append("：")
-                    .Append(Math.Round(window.RemainingPercent).ToString("0", CultureInfo.InvariantCulture)).Append("%")
-                    .Append("（").Append(reset.ToString("M月d日 HH:mm")).AppendLine(" 重置）");
+                if (language == "zh")
+                {
+                    text.Append(WindowName(window.WindowMinutes, language)).Append("：")
+                        .Append(Math.Round(window.RemainingPercent).ToString("0", CultureInfo.InvariantCulture)).Append("%")
+                        .Append("（").Append(reset.ToString("M月d日 HH:mm")).AppendLine(" 重置）");
+                }
+                else
+                {
+                    text.Append(WindowName(window.WindowMinutes, language)).Append(": ")
+                        .Append(Math.Round(window.RemainingPercent).ToString("0", CultureInfo.InvariantCulture)).Append("%")
+                        .Append(" (resets ").Append(reset.ToString("MMM d, HH:mm", CultureInfo.InvariantCulture)).AppendLine(")");
+                }
             }
-            if (!String.IsNullOrEmpty(value.PlanType)) text.AppendLine("方案：" + value.PlanType);
-            text.Append("数据更新：").Append(value.TimestampUtc.ToLocalTime().ToString("HH:mm:ss"));
+            if (!String.IsNullOrEmpty(value.PlanType)) text.AppendLine(Text(language, "Plan: ", "方案：") + value.PlanType);
+            text.Append(Text(language, "Updated: ", "数据更新：")).Append(value.TimestampUtc.ToLocalTime().ToString("HH:mm:ss"));
             return text.ToString();
         }
 
-        private static string WindowName(int minutes)
+        private static string WindowName(int minutes, string language)
         {
-            if (minutes >= 10000 && minutes <= 10200) return "周限额";
-            if (minutes >= 280 && minutes <= 320) return "5小时限额";
-            if (minutes % 1440 == 0) return (minutes / 1440).ToString(CultureInfo.InvariantCulture) + "天限额";
-            if (minutes % 60 == 0) return (minutes / 60).ToString(CultureInfo.InvariantCulture) + "小时限额";
-            return minutes.ToString(CultureInfo.InvariantCulture) + "分钟限额";
+            if (minutes >= 10000 && minutes <= 10200) return Text(language, "Weekly limit", "周限额");
+            if (minutes >= 280 && minutes <= 320) return Text(language, "5-hour limit", "5小时限额");
+            if (minutes % 1440 == 0) return (minutes / 1440).ToString(CultureInfo.InvariantCulture) + Text(language, "-day limit", "天限额");
+            if (minutes % 60 == 0) return (minutes / 60).ToString(CultureInfo.InvariantCulture) + Text(language, "-hour limit", "小时限额");
+            return minutes.ToString(CultureInfo.InvariantCulture) + Text(language, "-minute limit", "分钟限额");
         }
 
         private void OnAppearanceClick(object sender, RoutedEventArgs e)
         {
             OrbSettings original = settings.Clone();
-            AppearanceWindow dialog = new AppearanceWindow(this, settings.Clone(), ApplyAppearance);
+            AppearanceWindow dialog = new AppearanceWindow(this, settings.Clone(), PreviewSettings);
             bool? accepted = dialog.ShowDialog();
             if (accepted == true)
             {
@@ -598,9 +701,31 @@ namespace CodexUsageOrb
             else
             {
                 settings = original;
-                ApplyAppearance(settings);
+                PreviewSettings(settings);
             }
             settingsStore.Save(settings);
+        }
+
+        private void PreviewSettings(OrbSettings value)
+        {
+            ApplyAppearance(value);
+            if (displayedLanguage != value.Language) ApplyLanguage(value.Language);
+        }
+
+        private void ApplyLanguage(string language)
+        {
+            displayedLanguage = language == "zh" ? "zh" : "en";
+            Title = Text(displayedLanguage, "Codex Usage Orb", "Codex 用量悬浮球");
+            ContextMenu = BuildContextMenu(displayedLanguage);
+            startupItem = (MenuItem)ContextMenu.Items[4];
+            startupItem.IsCheckable = true;
+            startupItem.IsChecked = IsStartupEnabled();
+            UpdateDisplay();
+        }
+
+        private static string Text(string language, string english, string chinese)
+        {
+            return language == "zh" ? chinese : english;
         }
 
         private void ApplyAppearance(OrbSettings value)
@@ -678,7 +803,11 @@ namespace CodexUsageOrb
             }
             catch (Exception ex)
             {
-                MessageBox.Show("无法修改开机启动设置：" + ex.Message, "Codex 用量悬浮球", MessageBoxButton.OK, MessageBoxImage.Warning);
+                MessageBox.Show(
+                    Text(displayedLanguage, "Unable to update launch-at-startup settings: ", "无法修改开机启动设置：") + ex.Message,
+                    Text(displayedLanguage, "Codex Usage Orb", "Codex 用量悬浮球"),
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
                 startupItem.IsChecked = IsStartupEnabled();
             }
         }
