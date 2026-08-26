@@ -48,10 +48,10 @@ The build script creates a locally built, unsigned application. If macOS blocks 
 - Left-click and drag: move the orb
 - Hover: view each rate-limit window and reset time
 - Right-click → Refresh Now
-- Right-click → Appearance Settings: change the size and color in real time
+- Right-click → Appearance Settings: change the layout, size, meter widths, and colors in real time
 - Appearance Settings → Language: switch between English and Chinese
 - Right-click → Quit
 
 ## Appearance
 
-The macOS version supports sizes from 50 to 300 px, four color presets, the system color picker, and persistent size, color, language, and window position. English is used by default.
+The macOS version shows the 5-hour and weekly allowances together and can switch between **Concentric rings** and **Main value + weekly arc**. It supports sizes from 50 to 300 px, independent concentric-ring and weekly-arc widths from 2 to 14 px, independent colors for both meters, four presets plus the system color picker for each meter, and persistent layout, size, widths, colors, language, and window position. English and concentric rings are used by default.

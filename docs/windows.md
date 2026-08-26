@@ -35,7 +35,7 @@ Double-click the executable, or run:
 - Left-click and drag: move the orb
 - Hover: view each rate-limit window and reset time
 - Double-click: refresh immediately
-- Right-click → Appearance Settings: change the size and color in real time
+- Right-click → Appearance Settings: change the layout, size, meter widths, and colors in real time
 - Appearance Settings → Language: switch between English and Chinese
 - Right-click → Launch at Startup: toggle automatic startup
 - Right-click → Quit: close the application
@@ -43,12 +43,15 @@ Double-click the executable, or run:
 ## Appearance
 
 - Resize the orb from 50 to 300 px
-- Choose a green, blue, purple, or orange preset
-- Open the Windows color picker for a custom accent color
+- Adjust the concentric-ring and weekly-arc widths independently from 2 to 14 px
+- Switch between **Concentric rings** and **Main value + weekly arc**
+- View the 5-hour allowance as the primary value and the weekly allowance as the secondary meter
+- Choose separate colors for the 5-hour and weekly meters
+- Use green, blue, purple, or orange presets, or open the Windows color picker for either meter
 - Preview changes immediately; choose OK to save or Cancel to revert
 - English is the default language; the selected language is restored on the next launch
 
-The size, color, and position are saved to:
+The layout, size, both meter widths, both meter colors, language, and position are saved to:
 
 ```text
 %LOCALAPPDATA%\CodexUsageOrb\settings.ini

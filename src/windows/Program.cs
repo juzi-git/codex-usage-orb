@@ -43,6 +43,41 @@ namespace CodexUsageOrb
         }
 
         public double RemainingPercent { get { return Windows.Min(x => x.RemainingPercent); } }
+
+        public LimitWindow FiveHour
+        {
+            get
+            {
+                LimitWindow exact = Windows.FirstOrDefault(x => x.WindowMinutes >= 280 && x.WindowMinutes <= 320);
+                if (exact != null) return exact;
+                LimitWindow[] ordered = Windows.OrderBy(x => x.WindowMinutes).ToArray();
+                if (ordered.Length > 1) return ordered[0];
+                return ordered.Length == 1 && ordered[0].WindowMinutes < 1440 ? ordered[0] : null;
+            }
+        }
+
+        public LimitWindow Weekly
+        {
+            get
+            {
+                LimitWindow exact = Windows.FirstOrDefault(x => x.WindowMinutes >= 10000 && x.WindowMinutes <= 10200);
+                if (exact != null) return exact;
+                LimitWindow[] ordered = Windows.OrderBy(x => x.WindowMinutes).ToArray();
+                if (ordered.Length > 1) return ordered[ordered.Length - 1];
+                return ordered.Length == 1 && ordered[0].WindowMinutes >= 1440 ? ordered[0] : null;
+            }
+        }
+    }
+
+    internal static class OrbStyles
+    {
+        public const string Concentric = "concentric";
+        public const string MainWeekArc = "main-week-arc";
+
+        public static string Normalize(string value)
+        {
+            return value == MainWeekArc ? MainWeekArc : Concentric;
+        }
     }
 
     /// <summary>
@@ -166,7 +201,11 @@ namespace CodexUsageOrb
         public double Y { get; set; }
         public double Size { get; set; }
         public string Accent { get; set; }
+        public string WeeklyAccent { get; set; }
         public string Language { get; set; }
+        public string Style { get; set; }
+        public double ConcentricRingWidth { get; set; }
+        public double WeeklyArcWidth { get; set; }
 
         public OrbSettings()
         {
@@ -174,12 +213,16 @@ namespace CodexUsageOrb
             Y = Double.NaN;
             Size = 168;
             Accent = "#61DC18";
+            WeeklyAccent = "#A970FF";
             Language = "en";
+            Style = OrbStyles.Concentric;
+            ConcentricRingWidth = 5;
+            WeeklyArcWidth = 5;
         }
 
         public OrbSettings Clone()
         {
-            return new OrbSettings { X = X, Y = Y, Size = Size, Accent = Accent, Language = Language };
+            return new OrbSettings { X = X, Y = Y, Size = Size, Accent = Accent, WeeklyAccent = WeeklyAccent, Language = Language, Style = Style, ConcentricRingWidth = ConcentricRingWidth, WeeklyArcWidth = WeeklyArcWidth };
         }
     }
 
@@ -215,7 +258,11 @@ namespace CodexUsageOrb
                     else if (pair[0] == "Y" && TryDouble(pair[1], out value)) settings.Y = value;
                     else if (pair[0] == "Size" && TryDouble(pair[1], out value)) settings.Size = Math.Max(50, Math.Min(300, value));
                     else if (pair[0] == "Accent" && Regex.IsMatch(pair[1], "^#[0-9A-Fa-f]{6}$")) settings.Accent = pair[1].ToUpperInvariant();
+                    else if (pair[0] == "WeeklyAccent" && Regex.IsMatch(pair[1], "^#[0-9A-Fa-f]{6}$")) settings.WeeklyAccent = pair[1].ToUpperInvariant();
                     else if (pair[0] == "Language" && (pair[1] == "en" || pair[1] == "zh")) settings.Language = pair[1];
+                    else if (pair[0] == "Style") settings.Style = OrbStyles.Normalize(pair[1]);
+                    else if (pair[0] == "ConcentricRingWidth" && TryDouble(pair[1], out value)) settings.ConcentricRingWidth = Math.Max(2, Math.Min(14, value));
+                    else if (pair[0] == "WeeklyArcWidth" && TryDouble(pair[1], out value)) settings.WeeklyArcWidth = Math.Max(2, Math.Min(14, value));
                 }
             }
             catch (IOException) { }
@@ -234,7 +281,11 @@ namespace CodexUsageOrb
                     "Y=" + settings.Y.ToString(CultureInfo.InvariantCulture),
                     "Size=" + settings.Size.ToString(CultureInfo.InvariantCulture),
                     "Accent=" + settings.Accent,
-                    "Language=" + settings.Language
+                    "WeeklyAccent=" + settings.WeeklyAccent,
+                    "Language=" + settings.Language,
+                    "Style=" + OrbStyles.Normalize(settings.Style),
+                    "ConcentricRingWidth=" + settings.ConcentricRingWidth.ToString(CultureInfo.InvariantCulture),
+                    "WeeklyArcWidth=" + settings.WeeklyArcWidth.ToString(CultureInfo.InvariantCulture)
                 }));
             }
             catch (IOException) { }
@@ -251,8 +302,12 @@ namespace CodexUsageOrb
     {
         private readonly Action<OrbSettings> preview;
         private readonly TextBlock sizeValue;
-        private readonly Dictionary<string, Button> presetButtons = new Dictionary<string, Button>(StringComparer.OrdinalIgnoreCase);
-        private readonly Button customColorButton;
+        private readonly TextBlock concentricRingWidthValue;
+        private readonly TextBlock weeklyArcWidthValue;
+        private readonly Dictionary<string, Button> fiveHourPresetButtons = new Dictionary<string, Button>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, Button> weeklyPresetButtons = new Dictionary<string, Button>(StringComparer.OrdinalIgnoreCase);
+        private readonly Button fiveHourCustomColorButton;
+        private readonly Button weeklyCustomColorButton;
         public OrbSettings Value { get; private set; }
 
         public AppearanceWindow(Window owner, OrbSettings initial, Action<OrbSettings> previewAction)
@@ -263,7 +318,7 @@ namespace CodexUsageOrb
             bool chinese = Value.Language == "zh";
             Title = chinese ? "悬浮球外观设置" : "Orb Appearance Settings";
             Width = 350;
-            Height = 300;
+            Height = 500;
             WindowStartupLocation = WindowStartupLocation.CenterOwner;
             ResizeMode = ResizeMode.NoResize;
             ShowInTaskbar = false;
@@ -278,9 +333,14 @@ namespace CodexUsageOrb
             root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             Content = root;
 
-            TextBlock heading = new TextBlock { Text = chinese ? "调整大小、颜色和语言" : "Adjust size, color, and language", FontSize = 17, FontWeight = FontWeights.SemiBold, Foreground = new SolidColorBrush(Color.FromRgb(28, 38, 52)) };
+            TextBlock heading = new TextBlock { Text = chinese ? "调整样式、大小、宽度和颜色" : "Adjust style, size, width, and color", FontSize = 17, FontWeight = FontWeights.SemiBold, Foreground = new SolidColorBrush(Color.FromRgb(28, 38, 52)) };
             root.Children.Add(heading);
 
             Grid languageRow = new Grid { Margin = new Thickness(0, 14, 0, 0) };
@@ -299,6 +359,22 @@ namespace CodexUsageOrb
             Grid.SetRow(languageRow, 1);
             root.Children.Add(languageRow);
 
+            Grid styleRow = new Grid { Margin = new Thickness(0, 8, 0, 0) };
+            styleRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(76) });
+            styleRow.ColumnDefinitions.Add(new ColumnDefinition());
+            TextBlock styleLabel = new TextBlock { Text = chinese ? "显示样式" : "Display style", VerticalAlignment = VerticalAlignment.Center, FontSize = 13 };
+            ComboBox styleBox = new ComboBox { Width = 180, HorizontalAlignment = HorizontalAlignment.Left };
+            ComboBoxItem concentricItem = new ComboBoxItem { Content = chinese ? "同心双环" : "Concentric rings", Tag = OrbStyles.Concentric };
+            ComboBoxItem mainWeekArcItem = new ComboBoxItem { Content = chinese ? "主值 + 周弧" : "Main value + weekly arc", Tag = OrbStyles.MainWeekArc };
+            styleBox.Items.Add(concentricItem);
+            styleBox.Items.Add(mainWeekArcItem);
+            styleBox.SelectedIndex = OrbStyles.Normalize(Value.Style) == OrbStyles.MainWeekArc ? 1 : 0;
+            Grid.SetColumn(styleBox, 1);
+            styleRow.Children.Add(styleLabel);
+            styleRow.Children.Add(styleBox);
+            Grid.SetRow(styleRow, 2);
+            root.Children.Add(styleRow);
+
             Grid sizeRow = new Grid { Margin = new Thickness(0, 8, 0, 0) };
             sizeRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(76) });
             sizeRow.ColumnDefinitions.Add(new ColumnDefinition());
@@ -311,43 +387,72 @@ namespace CodexUsageOrb
             sizeRow.Children.Add(sizeLabel);
             sizeRow.Children.Add(sizeSlider);
             sizeRow.Children.Add(sizeValue);
-            Grid.SetRow(sizeRow, 2);
+            Grid.SetRow(sizeRow, 3);
             root.Children.Add(sizeRow);
 
-            TextBlock colorLabel = new TextBlock { Text = chinese ? "主题颜色" : "Theme color", Margin = new Thickness(0, 12, 0, 5), FontSize = 13 };
-            Grid.SetRow(colorLabel, 3);
-            root.Children.Add(colorLabel);
+            Grid concentricWidthRow = new Grid { Margin = new Thickness(0, 8, 0, 0) };
+            concentricWidthRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(76) });
+            concentricWidthRow.ColumnDefinitions.Add(new ColumnDefinition());
+            concentricWidthRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(50) });
+            TextBlock concentricWidthLabel = new TextBlock { Text = chinese ? "同心环宽" : "Ring width", VerticalAlignment = VerticalAlignment.Center, FontSize = 13 };
+            Slider concentricWidthSlider = new Slider { Minimum = 2, Maximum = 14, Value = Value.ConcentricRingWidth, TickFrequency = 1, IsSnapToTickEnabled = true, VerticalAlignment = VerticalAlignment.Center };
+            concentricRingWidthValue = new TextBlock { Text = Math.Round(Value.ConcentricRingWidth) + " px", VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Right };
+            Grid.SetColumn(concentricWidthSlider, 1);
+            Grid.SetColumn(concentricRingWidthValue, 2);
+            concentricWidthRow.Children.Add(concentricWidthLabel);
+            concentricWidthRow.Children.Add(concentricWidthSlider);
+            concentricWidthRow.Children.Add(concentricRingWidthValue);
+            Grid.SetRow(concentricWidthRow, 4);
+            root.Children.Add(concentricWidthRow);
 
-            StackPanel colors = new StackPanel { Orientation = Orientation.Horizontal };
-            AddPreset(colors, chinese ? "绿色" : "Green", "#61DC18");
-            AddPreset(colors, chinese ? "蓝色" : "Blue", "#37BEFF");
-            AddPreset(colors, chinese ? "紫色" : "Purple", "#A970FF");
-            AddPreset(colors, chinese ? "橙色" : "Orange", "#FF9F35");
-            customColorButton = new Button
-            {
-                Width = 42,
-                Height = 42,
-                Content = "+",
-                FontSize = 22,
-                FontWeight = FontWeights.Bold,
-                Padding = new Thickness(0),
-                Margin = new Thickness(3),
-                Background = new SolidColorBrush(Color.FromRgb(218, 218, 218)),
-                Foreground = new SolidColorBrush(Color.FromRgb(28, 38, 52)),
-                BorderBrush = Brushes.Transparent,
-                BorderThickness = new Thickness(3),
-                ToolTip = chinese ? "自定义颜色" : "Custom color"
-            };
-            customColorButton.Click += OnCustomColor;
-            colors.Children.Add(customColorButton);
-            Grid.SetRow(colors, 4);
-            root.Children.Add(colors);
+            Grid weeklyArcWidthRow = new Grid { Margin = new Thickness(0, 8, 0, 0) };
+            weeklyArcWidthRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(76) });
+            weeklyArcWidthRow.ColumnDefinitions.Add(new ColumnDefinition());
+            weeklyArcWidthRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(50) });
+            TextBlock weeklyArcWidthLabel = new TextBlock { Text = chinese ? "周弧宽度" : "Arc width", VerticalAlignment = VerticalAlignment.Center, FontSize = 13 };
+            Slider weeklyArcWidthSlider = new Slider { Minimum = 2, Maximum = 14, Value = Value.WeeklyArcWidth, TickFrequency = 1, IsSnapToTickEnabled = true, VerticalAlignment = VerticalAlignment.Center };
+            weeklyArcWidthValue = new TextBlock { Text = Math.Round(Value.WeeklyArcWidth) + " px", VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Right };
+            Grid.SetColumn(weeklyArcWidthSlider, 1);
+            Grid.SetColumn(weeklyArcWidthValue, 2);
+            weeklyArcWidthRow.Children.Add(weeklyArcWidthLabel);
+            weeklyArcWidthRow.Children.Add(weeklyArcWidthSlider);
+            weeklyArcWidthRow.Children.Add(weeklyArcWidthValue);
+            Grid.SetRow(weeklyArcWidthRow, 5);
+            root.Children.Add(weeklyArcWidthRow);
+
+            TextBlock fiveHourColorLabel = new TextBlock { Text = chinese ? "5小时颜色" : "5-hour color", Margin = new Thickness(0, 12, 0, 5), FontSize = 13 };
+            Grid.SetRow(fiveHourColorLabel, 6);
+            root.Children.Add(fiveHourColorLabel);
+
+            StackPanel fiveHourColors = new StackPanel { Orientation = Orientation.Horizontal };
+            AddPreset(fiveHourColors, chinese ? "绿色" : "Green", "#61DC18", false);
+            AddPreset(fiveHourColors, chinese ? "蓝色" : "Blue", "#37BEFF", false);
+            AddPreset(fiveHourColors, chinese ? "紫色" : "Purple", "#A970FF", false);
+            AddPreset(fiveHourColors, chinese ? "橙色" : "Orange", "#FF9F35", false);
+            fiveHourCustomColorButton = CreateCustomColorButton(chinese, false);
+            fiveHourColors.Children.Add(fiveHourCustomColorButton);
+            Grid.SetRow(fiveHourColors, 7);
+            root.Children.Add(fiveHourColors);
+
+            TextBlock weeklyColorLabel = new TextBlock { Text = chinese ? "每周颜色" : "Weekly color", Margin = new Thickness(0, 8, 0, 5), FontSize = 13 };
+            Grid.SetRow(weeklyColorLabel, 8);
+            root.Children.Add(weeklyColorLabel);
+
+            StackPanel weeklyColors = new StackPanel { Orientation = Orientation.Horizontal };
+            AddPreset(weeklyColors, chinese ? "绿色" : "Green", "#61DC18", true);
+            AddPreset(weeklyColors, chinese ? "蓝色" : "Blue", "#37BEFF", true);
+            AddPreset(weeklyColors, chinese ? "紫色" : "Purple", "#A970FF", true);
+            AddPreset(weeklyColors, chinese ? "橙色" : "Orange", "#FF9F35", true);
+            weeklyCustomColorButton = CreateCustomColorButton(chinese, true);
+            weeklyColors.Children.Add(weeklyCustomColorButton);
+            Grid.SetRow(weeklyColors, 9);
+            root.Children.Add(weeklyColors);
 
             Grid footer = new Grid { Margin = new Thickness(0, 18, 0, 0) };
             footer.ColumnDefinitions.Add(new ColumnDefinition());
             footer.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             Button reset = new Button { Content = chinese ? "恢复默认" : "Reset", Width = 70, Height = 30, HorizontalAlignment = HorizontalAlignment.Left };
-            reset.Click += delegate { Value.Size = 168; Value.Accent = "#61DC18"; Value.Language = "en"; sizeSlider.Value = 168; languageBox.SelectedIndex = 0; ApplyPreview(); };
+            reset.Click += delegate { Value.Size = 168; Value.Accent = "#61DC18"; Value.WeeklyAccent = "#A970FF"; Value.Language = "en"; Value.Style = OrbStyles.Concentric; Value.ConcentricRingWidth = 5; Value.WeeklyArcWidth = 5; sizeSlider.Value = 168; concentricWidthSlider.Value = 5; weeklyArcWidthSlider.Value = 5; languageBox.SelectedIndex = 0; styleBox.SelectedIndex = 0; ApplyPreview(); };
             StackPanel actions = new StackPanel { Orientation = Orientation.Horizontal };
             Button cancel = new Button { Content = chinese ? "取消" : "Cancel", Width = 70, Height = 30, Margin = new Thickness(0, 0, 8, 0), IsCancel = true };
             Button ok = new Button { Content = chinese ? "确定" : "OK", Width = 70, Height = 30, IsDefault = true };
@@ -357,13 +462,25 @@ namespace CodexUsageOrb
             actions.Children.Add(ok);
             Grid.SetColumn(actions, 1);
             footer.Children.Add(actions);
-            Grid.SetRow(footer, 5);
+            Grid.SetRow(footer, 10);
             root.Children.Add(footer);
 
             sizeSlider.ValueChanged += delegate
             {
                 Value.Size = sizeSlider.Value;
                 sizeValue.Text = Math.Round(Value.Size) + " px";
+                ApplyPreview();
+            };
+            concentricWidthSlider.ValueChanged += delegate
+            {
+                Value.ConcentricRingWidth = concentricWidthSlider.Value;
+                concentricRingWidthValue.Text = Math.Round(Value.ConcentricRingWidth) + " px";
+                ApplyPreview();
+            };
+            weeklyArcWidthSlider.ValueChanged += delegate
+            {
+                Value.WeeklyArcWidth = weeklyArcWidthSlider.Value;
+                weeklyArcWidthValue.Text = Math.Round(Value.WeeklyArcWidth) + " px";
                 ApplyPreview();
             };
             languageBox.SelectionChanged += delegate
@@ -373,10 +490,17 @@ namespace CodexUsageOrb
                 Value.Language = (string)selected.Tag;
                 ApplyPreview();
             };
+            styleBox.SelectionChanged += delegate
+            {
+                ComboBoxItem selected = styleBox.SelectedItem as ComboBoxItem;
+                if (selected == null) return;
+                Value.Style = OrbStyles.Normalize((string)selected.Tag);
+                ApplyPreview();
+            };
             UpdateColorSelection();
         }
 
-        private void AddPreset(Panel parent, string name, string hex)
+        private void AddPreset(Panel parent, string name, string hex, bool weekly)
         {
             Button button = new Button
             {
@@ -396,22 +520,49 @@ namespace CodexUsageOrb
             };
             button.Click += delegate
             {
-                Value.Accent = (string)button.Tag;
+                if (weekly) Value.WeeklyAccent = (string)button.Tag;
+                else Value.Accent = (string)button.Tag;
                 ApplyPreview();
             };
-            presetButtons[hex] = button;
+            (weekly ? weeklyPresetButtons : fiveHourPresetButtons)[hex] = button;
             parent.Children.Add(button);
+        }
+
+        private Button CreateCustomColorButton(bool chinese, bool weekly)
+        {
+            Button button = new Button
+            {
+                Width = 42,
+                Height = 42,
+                Content = "+",
+                Tag = weekly,
+                FontSize = 22,
+                FontWeight = FontWeights.Bold,
+                Padding = new Thickness(0),
+                Margin = new Thickness(3),
+                Background = new SolidColorBrush(Color.FromRgb(218, 218, 218)),
+                Foreground = new SolidColorBrush(Color.FromRgb(28, 38, 52)),
+                BorderBrush = Brushes.Transparent,
+                BorderThickness = new Thickness(3),
+                ToolTip = chinese ? "自定义颜色" : "Custom color"
+            };
+            button.Click += OnCustomColor;
+            return button;
         }
 
         private void OnCustomColor(object sender, RoutedEventArgs e)
         {
-            Color current = ColorFromHex(Value.Accent);
+            Button button = sender as Button;
+            bool weekly = button != null && button.Tag is bool && (bool)button.Tag;
+            Color current = ColorFromHex(weekly ? Value.WeeklyAccent : Value.Accent);
             using (System.Windows.Forms.ColorDialog dialog = new System.Windows.Forms.ColorDialog())
             {
                 dialog.FullOpen = true;
                 dialog.Color = System.Drawing.Color.FromArgb(current.R, current.G, current.B);
                 if (dialog.ShowDialog() != System.Windows.Forms.DialogResult.OK) return;
-                Value.Accent = String.Format(CultureInfo.InvariantCulture, "#{0:X2}{1:X2}{2:X2}", dialog.Color.R, dialog.Color.G, dialog.Color.B);
+                string selected = String.Format(CultureInfo.InvariantCulture, "#{0:X2}{1:X2}{2:X2}", dialog.Color.R, dialog.Color.G, dialog.Color.B);
+                if (weekly) Value.WeeklyAccent = selected;
+                else Value.Accent = selected;
                 ApplyPreview();
             }
         }
@@ -424,10 +575,16 @@ namespace CodexUsageOrb
 
         private void UpdateColorSelection()
         {
+            UpdateColorSelection(fiveHourPresetButtons, fiveHourCustomColorButton, Value.Accent);
+            UpdateColorSelection(weeklyPresetButtons, weeklyCustomColorButton, Value.WeeklyAccent);
+        }
+
+        private static void UpdateColorSelection(Dictionary<string, Button> buttons, Button customButton, string selectedColor)
+        {
             bool presetSelected = false;
-            foreach (KeyValuePair<string, Button> item in presetButtons)
+            foreach (KeyValuePair<string, Button> item in buttons)
             {
-                bool selected = String.Equals(item.Key, Value.Accent, StringComparison.OrdinalIgnoreCase);
+                bool selected = String.Equals(item.Key, selectedColor, StringComparison.OrdinalIgnoreCase);
                 if (selected) presetSelected = true;
                 item.Value.Content = selected ? "✓" : "";
                 item.Value.BorderBrush = selected
@@ -436,14 +593,14 @@ namespace CodexUsageOrb
             }
 
             bool customSelected = !presetSelected;
-            customColorButton.Content = customSelected ? "✓" : "+";
-            customColorButton.Background = customSelected
-                ? BrushFromHex(Value.Accent)
+            customButton.Content = customSelected ? "✓" : "+";
+            customButton.Background = customSelected
+                ? BrushFromHex(selectedColor)
                 : new SolidColorBrush(Color.FromRgb(218, 218, 218));
-            customColorButton.Foreground = customSelected
-                ? ContrastBrush(ColorFromHex(Value.Accent))
+            customButton.Foreground = customSelected
+                ? ContrastBrush(ColorFromHex(selectedColor))
                 : new SolidColorBrush(Color.FromRgb(28, 38, 52));
-            customColorButton.BorderBrush = customSelected
+            customButton.BorderBrush = customSelected
                 ? new SolidColorBrush(Color.FromRgb(28, 38, 52))
                 : Brushes.Transparent;
         }
@@ -476,8 +633,15 @@ namespace CodexUsageOrb
         private readonly Grid liquid;
         private readonly TextBlock percentText;
         private readonly TextBlock subtitleText;
+        private readonly TextBlock weeklyText;
         private readonly ShapePath waveBack;
         private readonly ShapePath waveFront;
+        private readonly ShapePath fiveHourTrack;
+        private readonly ShapePath fiveHourRing;
+        private readonly ShapePath weeklyTrack;
+        private readonly ShapePath weeklyRing;
+        private readonly ShapePath weeklyArcTrack;
+        private readonly ShapePath weeklyArc;
         private readonly ToolTip detailTip;
         private readonly System.Windows.Threading.DispatcherTimer refreshTimer;
         private readonly System.Windows.Threading.DispatcherTimer waveTimer;
@@ -485,6 +649,11 @@ namespace CodexUsageOrb
         private OrbSettings settings;
         private UsageSnapshot snapshot;
         private string displayedLanguage;
+        private string displayedStyle;
+        private Color displayedAccent;
+        private Color displayedWeeklyAccent;
+        private double displayedConcentricRingWidth;
+        private double displayedWeeklyArcWidth;
         private double phase;
         private bool refreshRunning;
 
@@ -492,6 +661,7 @@ namespace CodexUsageOrb
         {
             settings = settingsStore.Load();
             displayedLanguage = settings.Language;
+            displayedStyle = OrbStyles.Normalize(settings.Style);
             Title = Text(settings.Language, "Codex Usage Orb", "Codex 用量悬浮球");
             Width = settings.Size;
             Height = settings.Size;
@@ -531,6 +701,19 @@ namespace CodexUsageOrb
             liquid.Children.Add(waveBack);
             liquid.Children.Add(waveFront);
 
+            fiveHourTrack = CreateMeterPath(5);
+            fiveHourRing = CreateMeterPath(5);
+            weeklyTrack = CreateMeterPath(4);
+            weeklyRing = CreateMeterPath(4);
+            weeklyArcTrack = CreateMeterPath(5);
+            weeklyArc = CreateMeterPath(5);
+            root.Children.Add(fiveHourTrack);
+            root.Children.Add(fiveHourRing);
+            root.Children.Add(weeklyTrack);
+            root.Children.Add(weeklyRing);
+            root.Children.Add(weeklyArcTrack);
+            root.Children.Add(weeklyArc);
+
             StackPanel labels = new StackPanel { VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center };
             percentText = new TextBlock
             {
@@ -547,6 +730,17 @@ namespace CodexUsageOrb
             labels.Children.Add(percentText);
             labels.Children.Add(subtitleText);
             root.Children.Add(labels);
+
+            weeklyText = new TextBlock
+            {
+                Text = "W --", Foreground = new SolidColorBrush(Color.FromArgb(230, 220, 205, 255)),
+                FontFamily = new FontFamily("Segoe UI"), FontSize = 10, FontWeight = FontWeights.SemiBold,
+                TextAlignment = TextAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(0, 0, 0, 24)
+            };
+            root.Children.Add(weeklyText);
+            Grid.SetZIndex(labels, 10);
+            Grid.SetZIndex(weeklyText, 11);
             ApplyAppearance(settings);
 
             detailTip = new ToolTip { Placement = System.Windows.Controls.Primitives.PlacementMode.Left };
@@ -572,6 +766,19 @@ namespace CodexUsageOrb
             refreshTimer.Tick += delegate { RefreshNow(); };
             waveTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(45) };
             waveTimer.Tick += delegate { phase += 0.10; DrawWaves(); };
+        }
+
+        private static ShapePath CreateMeterPath(double thickness)
+        {
+            return new ShapePath
+            {
+                Fill = Brushes.Transparent,
+                Stroke = new SolidColorBrush(Color.FromArgb(70, 255, 255, 255)),
+                StrokeThickness = thickness,
+                StrokeStartLineCap = PenLineCap.Round,
+                StrokeEndLineCap = PenLineCap.Round,
+                IsHitTestVisible = false
+            };
         }
 
         private ContextMenu BuildContextMenu(string language)
@@ -636,21 +843,34 @@ namespace CodexUsageOrb
             {
                 percentText.Text = "--";
                 subtitleText.Text = Text(displayedLanguage, "No data", "暂无数据");
+                weeklyText.Text = Text(displayedLanguage, "W --", "周 --");
+                percentText.Foreground = Brushes.White;
                 detailTip.Content = Text(displayedLanguage,
                     "No Codex usage data was found.\nComplete at least one Codex conversation first.",
                     "尚未找到 Codex 用量数据。\n请先在 Codex 中完成一次对话。");
+                DrawWaves();
                 return;
             }
 
-            double remaining = snapshot.RemainingPercent;
-            percentText.Text = Math.Round(remaining).ToString("0", CultureInfo.InvariantCulture) + "%";
-            LimitWindow active = snapshot.Windows.OrderBy(x => x.RemainingPercent).First();
-            subtitleText.Text = Text(displayedLanguage,
-                WindowName(active.WindowMinutes, displayedLanguage) + " remaining",
-                WindowName(active.WindowMinutes, displayedLanguage) + "剩余");
-            percentText.Foreground = remaining <= 15 ? new SolidColorBrush(Color.FromRgb(255, 238, 225)) : Brushes.White;
+            LimitWindow fiveHour = snapshot.FiveHour;
+            LimitWindow weekly = snapshot.Weekly;
+            percentText.Text = FormatPercent(fiveHour);
+            subtitleText.Text = fiveHour == null
+                ? Text(displayedLanguage, "5-hour unavailable", "5小时暂无数据")
+                : Text(displayedLanguage, "5-hour remaining", "5小时剩余");
+            weeklyText.Text = Text(displayedLanguage, "W ", "周 ") + FormatPercent(weekly);
+            percentText.Foreground = fiveHour != null && fiveHour.RemainingPercent <= 15
+                ? new SolidColorBrush(Color.FromRgb(255, 238, 225))
+                : Brushes.White;
             detailTip.Content = BuildDetails(snapshot, displayedLanguage);
             DrawWaves();
+        }
+
+        private static string FormatPercent(LimitWindow window)
+        {
+            return window == null
+                ? "--"
+                : Math.Round(window.RemainingPercent).ToString("0", CultureInfo.InvariantCulture) + "%";
         }
 
         private static string BuildDetails(UsageSnapshot value, string language)
@@ -733,8 +953,13 @@ namespace CodexUsageOrb
             double size = Math.Max(50, Math.Min(300, value.Size));
             Width = size;
             Height = size;
+            displayedStyle = OrbStyles.Normalize(value.Style);
+            displayedConcentricRingWidth = Math.Max(2, Math.Min(14, value.ConcentricRingWidth));
+            displayedWeeklyArcWidth = Math.Max(2, Math.Min(14, value.WeeklyArcWidth));
 
             Color accent = AppearanceWindow.ColorFromHex(value.Accent);
+            displayedAccent = accent;
+            displayedWeeklyAccent = AppearanceWindow.ColorFromHex(value.WeeklyAccent);
             Color accentDark = ScaleColor(accent, 0.42);
             Color backgroundTop = ScaleColor(accent, 0.24);
             Color backgroundBottom = ScaleColor(accent, 0.14);
@@ -743,6 +968,14 @@ namespace CodexUsageOrb
             waveFront.Fill = new LinearGradientBrush(accent, accentDark, 90);
             Color softText = MixColor(accent, Colors.White, 0.84);
             subtitleText.Foreground = new SolidColorBrush(Color.FromArgb(225, softText.R, softText.G, softText.B));
+            bool showSecondaryLabels = size >= 80;
+            subtitleText.Visibility = showSecondaryLabels ? Visibility.Visible : Visibility.Collapsed;
+            weeklyText.Visibility = showSecondaryLabels ? Visibility.Visible : Visibility.Collapsed;
+            percentText.FontSize = displayedStyle == OrbStyles.Concentric ? 32 : 37;
+            weeklyText.Margin = displayedStyle == OrbStyles.Concentric
+                ? new Thickness(0, 0, 0, 31)
+                : new Thickness(0, 0, 0, 24);
+            DrawWaves();
 
             if (IsLoaded)
             {
@@ -771,9 +1004,105 @@ namespace CodexUsageOrb
 
         private void DrawWaves()
         {
-            double remaining = snapshot == null ? 50 : snapshot.RemainingPercent;
-            waveBack.Data = CreateWaveGeometry(remaining, phase + 1.8, 5.0, 25.0);
-            waveFront.Data = CreateWaveGeometry(remaining, phase, 6.5, 31.0);
+            LimitWindow fiveHour = snapshot == null ? null : snapshot.FiveHour;
+            LimitWindow weekly = snapshot == null ? null : snapshot.Weekly;
+            Color warning = Color.FromRgb(255, 122, 69);
+            Color fiveHourColor = fiveHour != null && fiveHour.RemainingPercent <= 15 ? warning : displayedAccent;
+            Color weeklyColor = weekly != null && weekly.RemainingPercent <= 15 ? warning : displayedWeeklyAccent;
+            Brush trackBrush = new SolidColorBrush(Color.FromArgb(72, 255, 255, 255));
+            double outerRingWidth = displayedConcentricRingWidth;
+            double innerRingWidth = Math.Max(1.5, outerRingWidth * 0.8);
+            double arcWidth = displayedWeeklyArcWidth;
+
+            fiveHourTrack.StrokeThickness = outerRingWidth;
+            fiveHourRing.StrokeThickness = outerRingWidth;
+            weeklyTrack.StrokeThickness = innerRingWidth;
+            weeklyRing.StrokeThickness = innerRingWidth;
+            weeklyArcTrack.StrokeThickness = arcWidth;
+            weeklyArc.StrokeThickness = arcWidth;
+
+            fiveHourTrack.Stroke = trackBrush;
+            weeklyTrack.Stroke = trackBrush;
+            weeklyArcTrack.Stroke = trackBrush;
+            fiveHourRing.Stroke = new SolidColorBrush(fiveHourColor);
+            weeklyRing.Stroke = new SolidColorBrush(weeklyColor);
+            weeklyArc.Stroke = new SolidColorBrush(weeklyColor);
+            weeklyText.Foreground = weekly == null
+                ? new SolidColorBrush(Color.FromArgb(150, 220, 225, 232))
+                : new SolidColorBrush(weeklyColor);
+
+            bool concentric = displayedStyle == OrbStyles.Concentric;
+            fiveHourTrack.Visibility = concentric ? Visibility.Visible : Visibility.Collapsed;
+            fiveHourRing.Visibility = concentric ? Visibility.Visible : Visibility.Collapsed;
+            weeklyTrack.Visibility = concentric ? Visibility.Visible : Visibility.Collapsed;
+            weeklyRing.Visibility = concentric ? Visibility.Visible : Visibility.Collapsed;
+            weeklyArcTrack.Visibility = concentric ? Visibility.Collapsed : Visibility.Visible;
+            weeklyArc.Visibility = concentric ? Visibility.Collapsed : Visibility.Visible;
+            waveBack.Visibility = !concentric && fiveHour != null ? Visibility.Visible : Visibility.Collapsed;
+            waveFront.Visibility = !concentric && fiveHour != null ? Visibility.Visible : Visibility.Collapsed;
+
+            if (concentric)
+            {
+                double outerRadius = OrbSize / 2 - outerRingWidth / 2 - 2;
+                double innerRadius = Math.Max(34, outerRadius - outerRingWidth / 2 - innerRingWidth / 2 - 5.5);
+                fiveHourTrack.Data = new EllipseGeometry(new Point(OrbSize / 2, OrbSize / 2), outerRadius, outerRadius);
+                weeklyTrack.Data = new EllipseGeometry(new Point(OrbSize / 2, OrbSize / 2), innerRadius, innerRadius);
+                fiveHourRing.Data = fiveHour == null ? Geometry.Empty : CreateArcGeometry(outerRadius, fiveHour.RemainingPercent, -90, 360);
+                weeklyRing.Data = weekly == null ? Geometry.Empty : CreateArcGeometry(innerRadius, weekly.RemainingPercent, -90, 360);
+                weeklyArcTrack.Data = Geometry.Empty;
+                weeklyArc.Data = Geometry.Empty;
+                waveBack.Data = Geometry.Empty;
+                waveFront.Data = Geometry.Empty;
+                return;
+            }
+
+            fiveHourTrack.Data = Geometry.Empty;
+            fiveHourRing.Data = Geometry.Empty;
+            weeklyTrack.Data = Geometry.Empty;
+            weeklyRing.Data = Geometry.Empty;
+            double weeklyArcRadius = Math.Max(50, 68 - arcWidth / 2);
+            weeklyArcTrack.Data = CreateArcGeometry(weeklyArcRadius, 100, 30, 120);
+            weeklyArc.Data = weekly == null ? Geometry.Empty : CreateArcGeometry(weeklyArcRadius, weekly.RemainingPercent, 30, 120);
+            if (fiveHour == null)
+            {
+                waveBack.Data = Geometry.Empty;
+                waveFront.Data = Geometry.Empty;
+                return;
+            }
+
+            waveBack.Data = CreateWaveGeometry(fiveHour.RemainingPercent, phase + 1.8, 5.0, 25.0);
+            waveFront.Data = CreateWaveGeometry(fiveHour.RemainingPercent, phase, 6.5, 31.0);
+        }
+
+        private static Geometry CreateArcGeometry(double radius, double percent, double startAngle, double maximumSweep)
+        {
+            double clamped = Math.Max(0, Math.Min(100, percent));
+            if (clamped <= 0) return Geometry.Empty;
+
+            double sweep = maximumSweep * clamped / 100.0;
+            Point center = new Point(OrbSize / 2, OrbSize / 2);
+            PathFigure figure = new PathFigure { StartPoint = PointOnCircle(center, radius, startAngle), IsClosed = false, IsFilled = false };
+            double currentAngle = startAngle;
+            while (sweep > 0.001)
+            {
+                double step = Math.Min(180, sweep);
+                currentAngle += step;
+                figure.Segments.Add(new ArcSegment
+                {
+                    Point = PointOnCircle(center, radius, currentAngle),
+                    Size = new Size(radius, radius),
+                    IsLargeArc = false,
+                    SweepDirection = SweepDirection.Clockwise
+                });
+                sweep -= step;
+            }
+            return new PathGeometry(new[] { figure });
+        }
+
+        private static Point PointOnCircle(Point center, double radius, double angle)
+        {
+            double radians = angle * Math.PI / 180.0;
+            return new Point(center.X + (Math.Cos(radians) * radius), center.Y + (Math.Sin(radians) * radius));
         }
 
         private static Geometry CreateWaveGeometry(double percent, double wavePhase, double amplitude, double wavelength)

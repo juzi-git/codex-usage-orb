@@ -24,6 +24,31 @@ private struct UsageSnapshot {
     var remainingPercent: Double {
         return windows.map(\.remainingPercent).min() ?? 0
     }
+
+    var fiveHour: LimitWindow? {
+        if let exact = windows.first(where: { (280...320).contains($0.windowMinutes) }) { return exact }
+        let ordered = windows.sorted { $0.windowMinutes < $1.windowMinutes }
+        if ordered.count > 1 { return ordered.first }
+        guard let only = ordered.first, only.windowMinutes < 1_440 else { return nil }
+        return only
+    }
+
+    var weekly: LimitWindow? {
+        if let exact = windows.first(where: { (10_000...10_200).contains($0.windowMinutes) }) { return exact }
+        let ordered = windows.sorted { $0.windowMinutes < $1.windowMinutes }
+        if ordered.count > 1 { return ordered.last }
+        guard let only = ordered.first, only.windowMinutes >= 1_440 else { return nil }
+        return only
+    }
+}
+
+private enum OrbStyle: String {
+    case concentric
+    case mainWeekArc = "main-week-arc"
+
+    init(storedValue: String?) {
+        self = storedValue == OrbStyle.mainWeekArc.rawValue ? .mainWeekArc : .concentric
+    }
 }
 
 /// Reads only the tail of recent Codex rollout files. Authentication data and
@@ -123,9 +148,17 @@ private final class OrbView: NSView {
     var accent = NSColor(calibratedRed: 0.38, green: 0.86, blue: 0.09, alpha: 1) {
         didSet { needsDisplay = true }
     }
+    var weeklyAccent = NSColor(calibratedRed: 169.0 / 255.0, green: 112.0 / 255.0, blue: 1, alpha: 1) {
+        didSet { needsDisplay = true }
+    }
     var language = "en" {
         didSet { updateToolTip(); needsDisplay = true }
     }
+    var style: OrbStyle = .concentric {
+        didSet { needsDisplay = true }
+    }
+    var concentricRingWidth: CGFloat = 5 { didSet { needsDisplay = true } }
+    var weeklyArcWidth: CGFloat = 5 { didSet { needsDisplay = true } }
     private var phase: CGFloat = 0
     private var animationTimer: Timer?
 
@@ -156,16 +189,82 @@ private final class OrbView: NSView {
         let darkBottom = accent.scaled(by: 0.14)
         NSGradient(starting: darkBottom, ending: darkTop)?.draw(in: circle, angle: 90)
 
-        NSGraphicsContext.saveGraphicsState()
-        circle.addClip()
-        let remaining = CGFloat(snapshot?.remainingPercent ?? 50) / 100
-        drawWave(in: circleRect, fill: remaining, phase: phase + 1.8, amplitude: 0.033, wavelength: 0.20,
-                 top: accent.withAlphaComponent(0.73), bottom: accent.scaled(by: 0.55).withAlphaComponent(0.82))
-        drawWave(in: circleRect, fill: remaining, phase: phase, amplitude: 0.043, wavelength: 0.25,
-                 top: accent, bottom: accent.scaled(by: 0.42))
-        NSGraphicsContext.restoreGraphicsState()
+        let fiveHour = snapshot?.fiveHour
+        let weekly = snapshot?.weekly
+        let warning = NSColor(calibratedRed: 1.0, green: 0.48, blue: 0.27, alpha: 1)
+        let fiveColor = (fiveHour?.remainingPercent ?? 100) <= 15 ? warning : accent
+        let weeklyColor = (weekly?.remainingPercent ?? 100) <= 15 ? warning : weeklyAccent
 
-        drawLabels(in: circleRect)
+        if style == .concentric {
+            let scale = circleRect.width / 150
+            let outerWidth = max(1, min(14, concentricRingWidth) * scale)
+            let innerWidth = max(1, outerWidth * 0.8)
+            let outerInset = circleRect.width * 0.02
+            let innerInset = outerInset + outerWidth / 2 + innerWidth / 2 + 5.5 * scale
+            drawFullMeter(in: circleRect, inset: outerInset, percent: fiveHour?.remainingPercent,
+                          color: fiveColor, lineWidth: outerWidth)
+            drawFullMeter(in: circleRect, inset: innerInset, percent: weekly?.remainingPercent,
+                          color: weeklyColor, lineWidth: innerWidth)
+        } else {
+            if let remaining = fiveHour?.remainingPercent {
+                NSGraphicsContext.saveGraphicsState()
+                circle.addClip()
+                let fill = CGFloat(remaining) / 100
+                drawWave(in: circleRect, fill: fill, phase: phase + 1.8, amplitude: 0.033, wavelength: 0.20,
+                         top: accent.withAlphaComponent(0.73), bottom: accent.scaled(by: 0.55).withAlphaComponent(0.82))
+                drawWave(in: circleRect, fill: fill, phase: phase, amplitude: 0.043, wavelength: 0.25,
+                         top: accent, bottom: accent.scaled(by: 0.42))
+                NSGraphicsContext.restoreGraphicsState()
+            }
+            drawPartialMeter(in: circleRect, percent: weekly?.remainingPercent, color: weeklyColor,
+                             lineWidth: max(1, min(14, weeklyArcWidth) * circleRect.width / 150))
+        }
+
+        drawLabels(
+            in: circleRect,
+            weeklyColor: weekly == nil ? NSColor.white.withAlphaComponent(0.45) : weeklyColor
+        )
+    }
+
+    private func drawFullMeter(in rect: NSRect, inset: CGFloat, percent: Double?, color: NSColor, lineWidth: CGFloat) {
+        let meterRect = rect.insetBy(dx: inset + lineWidth / 2, dy: inset + lineWidth / 2)
+        let track = NSBezierPath(ovalIn: meterRect)
+        track.lineWidth = lineWidth
+        NSColor.white.withAlphaComponent(0.18).setStroke()
+        track.stroke()
+        guard let percent = percent, percent > 0 else { return }
+        if percent >= 99.999 {
+            color.setStroke()
+            track.stroke()
+            return
+        }
+        let radius = meterRect.width / 2
+        let progress = NSBezierPath()
+        progress.appendArc(withCenter: NSPoint(x: meterRect.midX, y: meterRect.midY), radius: radius,
+                           startAngle: 90, endAngle: 90 - CGFloat(360 * percent / 100), clockwise: true)
+        progress.lineWidth = lineWidth
+        progress.lineCapStyle = .round
+        color.setStroke()
+        progress.stroke()
+    }
+
+    private func drawPartialMeter(in rect: NSRect, percent: Double?, color: NSColor, lineWidth: CGFloat) {
+        let radius = rect.width * 0.39
+        let center = NSPoint(x: rect.midX, y: rect.midY)
+        let track = NSBezierPath()
+        track.appendArc(withCenter: center, radius: radius, startAngle: 210, endAngle: 330, clockwise: false)
+        track.lineWidth = lineWidth
+        track.lineCapStyle = .round
+        NSColor.white.withAlphaComponent(0.18).setStroke()
+        track.stroke()
+        guard let percent = percent, percent > 0 else { return }
+        let progress = NSBezierPath()
+        progress.appendArc(withCenter: center, radius: radius, startAngle: 210,
+                           endAngle: 210 + CGFloat(120 * percent / 100), clockwise: false)
+        progress.lineWidth = lineWidth
+        progress.lineCapStyle = .round
+        color.setStroke()
+        progress.stroke()
     }
 
     private func drawWave(in rect: NSRect, fill: CGFloat, phase: CGFloat, amplitude: CGFloat,
@@ -185,14 +284,17 @@ private final class OrbView: NSView {
         NSGradient(starting: bottom, ending: top)?.draw(in: path, angle: 90)
     }
 
-    private func drawLabels(in rect: NSRect) {
-        let percent = snapshot.map { "\(Int($0.remainingPercent.rounded()))%" } ?? "--"
-        let active = snapshot?.windows.min { $0.remainingPercent < $1.remainingPercent }
-        let subtitle = active.map {
-            localized(language, "\(windowName($0.windowMinutes, language)) remaining", "\(windowName($0.windowMinutes, language))剩余")
-        } ?? localized(language, "No data", "暂无数据")
+    private func drawLabels(in rect: NSRect, weeklyColor: NSColor) {
+        let fiveHour = snapshot?.fiveHour
+        let weekly = snapshot?.weekly
+        let percent = fiveHour.map { "\(Int($0.remainingPercent.rounded()))%" } ?? "--"
+        let subtitle = fiveHour == nil
+            ? localized(language, "5-hour unavailable", "5小时暂无数据")
+            : localized(language, "5-hour remaining", "5小时剩余")
+        let weeklyText = localized(language, "W ", "周 ") + (weekly.map { "\(Int($0.remainingPercent.rounded()))%" } ?? "--")
 
-        let percentFont = NSFont.systemFont(ofSize: rect.width * 0.27, weight: .semibold)
+        let percentScale: CGFloat = style == .concentric ? 0.23 : 0.27
+        let percentFont = NSFont.systemFont(ofSize: rect.width * percentScale, weight: .semibold)
         let percentAttributes: [NSAttributedString.Key: Any] = [
             .font: percentFont,
             .foregroundColor: NSColor.white
@@ -203,7 +305,7 @@ private final class OrbView: NSView {
             withAttributes: percentAttributes
         )
 
-        guard rect.width >= 72 else { return }
+        guard rect.width >= 80 else { return }
         let subtitleFont = NSFont.systemFont(ofSize: max(7, rect.width * 0.065), weight: .medium)
         let subtitleAttributes: [NSAttributedString.Key: Any] = [
             .font: subtitleFont,
@@ -213,6 +315,18 @@ private final class OrbView: NSView {
         subtitle.draw(
             at: NSPoint(x: rect.midX - subtitleSize.width / 2, y: rect.midY - percentSize.height * 0.68),
             withAttributes: subtitleAttributes
+        )
+
+        let weeklyFont = NSFont.systemFont(ofSize: max(7, rect.width * 0.062), weight: .semibold)
+        let weeklyAttributes: [NSAttributedString.Key: Any] = [
+            .font: weeklyFont,
+            .foregroundColor: weeklyColor
+        ]
+        let weeklySize = weeklyText.size(withAttributes: weeklyAttributes)
+        let bottomOffset = style == .concentric ? rect.height * 0.18 : rect.height * 0.13
+        weeklyText.draw(
+            at: NSPoint(x: rect.midX - weeklySize.width / 2, y: rect.minY + bottomOffset),
+            withAttributes: weeklyAttributes
         )
     }
 
@@ -252,11 +366,18 @@ private final class AppearanceControls: NSObject {
     let view: NSView
     let slider: NSSlider
     let sizeLabel: NSTextField
-    let colorWell: NSColorWell
+    let concentricRingWidthSlider: NSSlider
+    let concentricRingWidthLabel: NSTextField
+    let weeklyArcWidthSlider: NSSlider
+    let weeklyArcWidthLabel: NSTextField
+    let fiveHourColorWell: NSColorWell
+    let weeklyColorWell: NSColorWell
     let languagePopup: NSPopUpButton
-    var onChange: ((CGFloat, NSColor, String) -> Void)?
+    let stylePopup: NSPopUpButton
+    let resetButton: NSButton
+    var onChange: ((CGFloat, CGFloat, CGFloat, NSColor, NSColor, String, OrbStyle) -> Void)?
 
-    init(size: CGFloat, color: NSColor, language: String) {
+    init(size: CGFloat, concentricRingWidth: CGFloat, weeklyArcWidth: CGFloat, color: NSColor, weeklyColor: NSColor, language: String, style: OrbStyle) {
         let container = NSStackView()
         container.orientation = .vertical
         container.alignment = .leading
@@ -274,6 +395,19 @@ private final class AppearanceControls: NSObject {
         languageRow.addArrangedSubview(languageTitle)
         languageRow.addArrangedSubview(languagePopup)
 
+        let styleRow = NSStackView()
+        styleRow.orientation = .horizontal
+        styleRow.spacing = 8
+        let styleTitle = NSTextField(labelWithString: localized(language, "Display style", "显示样式"))
+        styleTitle.setContentHuggingPriority(.required, for: .horizontal)
+        stylePopup = NSPopUpButton(frame: .zero, pullsDown: false)
+        stylePopup.addItems(withTitles: language == "zh"
+            ? ["同心双环", "主值 + 周弧"]
+            : ["Concentric rings", "Main value + weekly arc"])
+        stylePopup.selectItem(at: style == .mainWeekArc ? 1 : 0)
+        styleRow.addArrangedSubview(styleTitle)
+        styleRow.addArrangedSubview(stylePopup)
+
         let sizeRow = NSStackView()
         sizeRow.orientation = .horizontal
         sizeRow.spacing = 8
@@ -289,53 +423,144 @@ private final class AppearanceControls: NSObject {
         sizeRow.addArrangedSubview(slider)
         sizeRow.addArrangedSubview(sizeLabel)
 
-        let colorRow = NSStackView()
-        colorRow.orientation = .horizontal
-        colorRow.spacing = 6
+        let concentricWidthRow = NSStackView()
+        concentricWidthRow.orientation = .horizontal
+        concentricWidthRow.spacing = 8
+        let concentricWidthTitle = NSTextField(labelWithString: localized(language, "Ring width", "同心环宽"))
+        concentricWidthTitle.setContentHuggingPriority(.required, for: .horizontal)
+        concentricRingWidthSlider = NSSlider(value: Double(concentricRingWidth), minValue: 2, maxValue: 14, target: nil, action: nil)
+        concentricRingWidthSlider.numberOfTickMarks = 13
+        concentricRingWidthSlider.allowsTickMarkValuesOnly = true
+        concentricRingWidthLabel = NSTextField(labelWithString: "\(Int(concentricRingWidth.rounded())) px")
+        concentricRingWidthLabel.alignment = .right
+        concentricWidthRow.addArrangedSubview(concentricWidthTitle)
+        concentricWidthRow.addArrangedSubview(concentricRingWidthSlider)
+        concentricWidthRow.addArrangedSubview(concentricRingWidthLabel)
+
+        let weeklyArcWidthRow = NSStackView()
+        weeklyArcWidthRow.orientation = .horizontal
+        weeklyArcWidthRow.spacing = 8
+        let weeklyArcWidthTitle = NSTextField(labelWithString: localized(language, "Arc width", "周弧宽度"))
+        weeklyArcWidthTitle.setContentHuggingPriority(.required, for: .horizontal)
+        weeklyArcWidthSlider = NSSlider(value: Double(weeklyArcWidth), minValue: 2, maxValue: 14, target: nil, action: nil)
+        weeklyArcWidthSlider.numberOfTickMarks = 13
+        weeklyArcWidthSlider.allowsTickMarkValuesOnly = true
+        weeklyArcWidthLabel = NSTextField(labelWithString: "\(Int(weeklyArcWidth.rounded())) px")
+        weeklyArcWidthLabel.alignment = .right
+        weeklyArcWidthRow.addArrangedSubview(weeklyArcWidthTitle)
+        weeklyArcWidthRow.addArrangedSubview(weeklyArcWidthSlider)
+        weeklyArcWidthRow.addArrangedSubview(weeklyArcWidthLabel)
+
         let presetNames = language == "zh"
             ? [("绿色", "#61DC18"), ("蓝色", "#37BEFF"), ("紫色", "#A970FF"), ("橙色", "#FF9F35")]
             : [("Green", "#61DC18"), ("Blue", "#37BEFF"), ("Purple", "#A970FF"), ("Orange", "#FF9F35")]
+
+        let fiveHourColorTitle = NSTextField(labelWithString: localized(language, "5-hour color", "5小时颜色"))
+        let fiveHourColorRow = NSStackView()
+        fiveHourColorRow.orientation = .horizontal
+        fiveHourColorRow.spacing = 6
         for preset in presetNames {
             let button = NSButton(title: preset.0, target: nil, action: nil)
-            button.identifier = NSUserInterfaceItemIdentifier(preset.1)
+            button.identifier = NSUserInterfaceItemIdentifier("five:\(preset.1)")
             button.bezelStyle = .rounded
-            colorRow.addArrangedSubview(button)
+            fiveHourColorRow.addArrangedSubview(button)
         }
-        colorWell = NSColorWell(frame: NSRect(x: 0, y: 0, width: 48, height: 28))
-        colorWell.color = color
-        colorRow.addArrangedSubview(colorWell)
+        fiveHourColorWell = NSColorWell(frame: NSRect(x: 0, y: 0, width: 48, height: 28))
+        fiveHourColorWell.color = color
+        fiveHourColorRow.addArrangedSubview(fiveHourColorWell)
+
+        let weeklyColorTitle = NSTextField(labelWithString: localized(language, "Weekly color", "每周颜色"))
+        let weeklyColorRow = NSStackView()
+        weeklyColorRow.orientation = .horizontal
+        weeklyColorRow.spacing = 6
+        for preset in presetNames {
+            let button = NSButton(title: preset.0, target: nil, action: nil)
+            button.identifier = NSUserInterfaceItemIdentifier("weekly:\(preset.1)")
+            button.bezelStyle = .rounded
+            weeklyColorRow.addArrangedSubview(button)
+        }
+        weeklyColorWell = NSColorWell(frame: NSRect(x: 0, y: 0, width: 48, height: 28))
+        weeklyColorWell.color = weeklyColor
+        weeklyColorRow.addArrangedSubview(weeklyColorWell)
+
+        resetButton = NSButton(title: localized(language, "Reset", "恢复默认"), target: nil, action: nil)
+        resetButton.bezelStyle = .rounded
 
         container.addArrangedSubview(languageRow)
+        container.addArrangedSubview(styleRow)
         container.addArrangedSubview(sizeRow)
-        container.addArrangedSubview(colorRow)
+        container.addArrangedSubview(concentricWidthRow)
+        container.addArrangedSubview(weeklyArcWidthRow)
+        container.addArrangedSubview(fiveHourColorTitle)
+        container.addArrangedSubview(fiveHourColorRow)
+        container.addArrangedSubview(weeklyColorTitle)
+        container.addArrangedSubview(weeklyColorRow)
+        container.addArrangedSubview(resetButton)
         view = container
         super.init()
 
         slider.target = self
         slider.action = #selector(valueChanged)
-        colorWell.target = self
-        colorWell.action = #selector(valueChanged)
+        concentricRingWidthSlider.target = self
+        concentricRingWidthSlider.action = #selector(valueChanged)
+        weeklyArcWidthSlider.target = self
+        weeklyArcWidthSlider.action = #selector(valueChanged)
+        fiveHourColorWell.target = self
+        fiveHourColorWell.action = #selector(valueChanged)
+        weeklyColorWell.target = self
+        weeklyColorWell.action = #selector(valueChanged)
         languagePopup.target = self
         languagePopup.action = #selector(valueChanged)
-        for case let button as NSButton in colorRow.arrangedSubviews {
+        stylePopup.target = self
+        stylePopup.action = #selector(valueChanged)
+        resetButton.target = self
+        resetButton.action = #selector(resetDefaults)
+        for case let button as NSButton in fiveHourColorRow.arrangedSubviews + weeklyColorRow.arrangedSubviews {
             button.target = self
             button.action = #selector(presetClicked(_:))
         }
 
         NSLayoutConstraint.activate([
             container.widthAnchor.constraint(equalToConstant: 320),
-            slider.widthAnchor.constraint(equalToConstant: 190)
+            slider.widthAnchor.constraint(equalToConstant: 190),
+            concentricRingWidthSlider.widthAnchor.constraint(equalToConstant: 190),
+            weeklyArcWidthSlider.widthAnchor.constraint(equalToConstant: 190)
         ])
     }
 
     @objc private func valueChanged() {
         sizeLabel.stringValue = "\(Int(slider.doubleValue.rounded())) px"
-        onChange?(CGFloat(slider.doubleValue), colorWell.color, languagePopup.indexOfSelectedItem == 1 ? "zh" : "en")
+        concentricRingWidthLabel.stringValue = "\(Int(concentricRingWidthSlider.doubleValue.rounded())) px"
+        weeklyArcWidthLabel.stringValue = "\(Int(weeklyArcWidthSlider.doubleValue.rounded())) px"
+        onChange?(
+            CGFloat(slider.doubleValue),
+            CGFloat(concentricRingWidthSlider.doubleValue),
+            CGFloat(weeklyArcWidthSlider.doubleValue),
+            fiveHourColorWell.color,
+            weeklyColorWell.color,
+            languagePopup.indexOfSelectedItem == 1 ? "zh" : "en",
+            stylePopup.indexOfSelectedItem == 1 ? .mainWeekArc : .concentric
+        )
     }
 
     @objc private func presetClicked(_ sender: NSButton) {
-        guard let value = sender.identifier?.rawValue, let color = NSColor(hex: value) else { return }
-        colorWell.color = color
+        guard let identifier = sender.identifier?.rawValue,
+              let separator = identifier.firstIndex(of: ":"),
+              let color = NSColor(hex: String(identifier[identifier.index(after: separator)...])) else { return }
+        if identifier.hasPrefix("weekly:") { weeklyColorWell.color = color }
+        else { fiveHourColorWell.color = color }
+        valueChanged()
+    }
+
+    @objc private func resetDefaults() {
+        slider.doubleValue = 168
+        sizeLabel.stringValue = "168 px"
+        concentricRingWidthSlider.doubleValue = 5
+        weeklyArcWidthSlider.doubleValue = 5
+        fiveHourColorWell.color = NSColor(hex: "#61DC18")!
+        weeklyColorWell.color = NSColor(hex: "#A970FF")!
+        languagePopup.selectItem(at: 0)
+        stylePopup.selectItem(at: 0)
         valueChanged()
     }
 }
@@ -348,13 +573,23 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     private var refreshTimer: Timer?
     private var size: CGFloat = 168
     private var accent = NSColor(hex: "#61DC18")!
+    private var weeklyAccent = NSColor(hex: "#A970FF")!
     private var language = "en"
+    private var style: OrbStyle = .concentric
+    private var concentricRingWidth: CGFloat = 5
+    private var weeklyArcWidth: CGFloat = 5
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let storedSize = defaults.double(forKey: "orbSize")
         size = storedSize == 0 ? 168 : CGFloat(max(50, min(300, storedSize)))
         if let hex = defaults.string(forKey: "accent"), let color = NSColor(hex: hex) { accent = color }
+        if let hex = defaults.string(forKey: "weeklyAccent"), let color = NSColor(hex: hex) { weeklyAccent = color }
         language = defaults.string(forKey: "language") == "zh" ? "zh" : "en"
+        style = OrbStyle(storedValue: defaults.string(forKey: "orbStyle"))
+        let storedRingWidth = defaults.double(forKey: "concentricRingWidth")
+        concentricRingWidth = storedRingWidth == 0 ? 5 : CGFloat(max(2, min(14, storedRingWidth)))
+        let storedArcWidth = defaults.double(forKey: "weeklyArcWidth")
+        weeklyArcWidth = storedArcWidth == 0 ? 5 : CGFloat(max(2, min(14, storedArcWidth)))
 
         panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: size, height: size),
@@ -375,7 +610,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         orbView.autoresizingMask = [.width, .height]
         orbView.delegate = self
         orbView.accent = accent
+        orbView.weeklyAccent = weeklyAccent
         orbView.language = language
+        orbView.style = style
+        orbView.concentricRingWidth = concentricRingWidth
+        orbView.weeklyArcWidth = weeklyArcWidth
         panel.contentView = orbView
         restorePosition()
         panel.orderFrontRegardless()
@@ -410,17 +649,21 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     @objc private func showAppearance() {
         let originalSize = size
         let originalAccent = accent
+        let originalWeeklyAccent = weeklyAccent
         let originalLanguage = language
-        let controls = AppearanceControls(size: size, color: accent, language: language)
-        controls.onChange = { [weak self] newSize, newColor, newLanguage in
-            self?.apply(size: newSize, accent: newColor, language: newLanguage)
+        let originalStyle = style
+        let originalConcentricRingWidth = concentricRingWidth
+        let originalWeeklyArcWidth = weeklyArcWidth
+        let controls = AppearanceControls(size: size, concentricRingWidth: concentricRingWidth, weeklyArcWidth: weeklyArcWidth, color: accent, weeklyColor: weeklyAccent, language: language, style: style)
+        controls.onChange = { [weak self] newSize, newRingWidth, newArcWidth, newColor, newWeeklyColor, newLanguage, newStyle in
+            self?.apply(size: newSize, concentricRingWidth: newRingWidth, weeklyArcWidth: newArcWidth, accent: newColor, weeklyAccent: newWeeklyColor, language: newLanguage, style: newStyle)
         }
 
         let alert = NSAlert()
-        alert.messageText = localized(language, "Adjust size, color, and language", "实时调整大小、颜色和语言")
+        alert.messageText = localized(language, "Adjust style, size, width, color, and language", "实时调整样式、大小、宽度、颜色和语言")
         alert.informativeText = localized(language,
-            "Choose a size from 50 to 300 px. Changes are previewed immediately.",
-            "尺寸范围为 50–300 px，修改会立即预览。")
+            "Size: 50–300 px. Meter widths: 2–14 px. Changes are previewed immediately.",
+            "尺寸范围为 50–300 px，环与周弧宽度范围为 2–14 px，修改会立即预览。")
         alert.accessoryView = controls.view
         alert.addButton(withTitle: localized(language, "OK", "确定"))
         alert.addButton(withTitle: localized(language, "Cancel", "取消"))
@@ -428,19 +671,31 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         if response == .alertFirstButtonReturn {
             defaults.set(Double(size), forKey: "orbSize")
             defaults.set(accent.hexString, forKey: "accent")
+            defaults.set(weeklyAccent.hexString, forKey: "weeklyAccent")
             defaults.set(language, forKey: "language")
+            defaults.set(style.rawValue, forKey: "orbStyle")
+            defaults.set(Double(concentricRingWidth), forKey: "concentricRingWidth")
+            defaults.set(Double(weeklyArcWidth), forKey: "weeklyArcWidth")
         } else {
-            apply(size: originalSize, accent: originalAccent, language: originalLanguage)
+            apply(size: originalSize, concentricRingWidth: originalConcentricRingWidth, weeklyArcWidth: originalWeeklyArcWidth, accent: originalAccent, weeklyAccent: originalWeeklyAccent, language: originalLanguage, style: originalStyle)
         }
     }
 
-    private func apply(size newSize: CGFloat, accent newAccent: NSColor, language newLanguage: String) {
+    private func apply(size newSize: CGFloat, concentricRingWidth newConcentricRingWidth: CGFloat, weeklyArcWidth newWeeklyArcWidth: CGFloat, accent newAccent: NSColor, weeklyAccent newWeeklyAccent: NSColor, language newLanguage: String, style newStyle: OrbStyle) {
         size = max(50, min(300, newSize))
+        concentricRingWidth = max(2, min(14, newConcentricRingWidth))
+        weeklyArcWidth = max(2, min(14, newWeeklyArcWidth))
         accent = newAccent.usingColorSpace(.deviceRGB) ?? newAccent
+        weeklyAccent = newWeeklyAccent.usingColorSpace(.deviceRGB) ?? newWeeklyAccent
         language = newLanguage == "zh" ? "zh" : "en"
+        style = newStyle
         panel.setContentSize(NSSize(width: size, height: size))
         orbView.accent = accent
+        orbView.weeklyAccent = weeklyAccent
         orbView.language = language
+        orbView.style = style
+        orbView.concentricRingWidth = concentricRingWidth
+        orbView.weeklyArcWidth = weeklyArcWidth
         clampToVisibleScreen()
     }
 

@@ -19,10 +19,13 @@ A lightweight, draggable desktop orb that shows your remaining Codex usage at a 
 - Freely draggable with the mouse
 - Refreshes local Codex rate-limit data every 5 seconds
 - Animated liquid level and remaining percentage
+- Shows the 5-hour and weekly remaining allowances at the same time
+- Two switchable layouts: concentric rings or main value with a weekly arc
 - Dynamically adjustable from 50 to 300 px
-- Green, blue, purple, and orange themes, plus a custom color picker
+- Independently adjustable concentric-ring and weekly-arc widths from 2 to 14 px
+- Independent 5-hour and weekly colors, each with presets and a custom color picker
 - English by default, with an English/Chinese language switch in settings
-- Persists the size, color, and window position
+- Persists the layout, size, meter widths, colors, language, and window position
 - Reads local data only and makes no network requests
 
 ## Screenshots
@@ -54,7 +57,7 @@ The context-menu screenshot shows the default English interface. The other scree
 
 Codex writes structured rate-limit information to recent session files under its local data directory. The orb reads only the tail of the most recently updated session files and extracts the `rate_limits` field.
 
-When multiple limit windows are present, the main percentage shows the lowest remaining value. This prevents a short-term limit from being overlooked when the weekly limit still has capacity.
+The 5-hour window is the primary value and the weekly window is shown as a secondary ring or arc. Windows are identified by their reported duration, with shortest/longest-window fallback handling if the field order changes.
 
 ### Privacy
 
@@ -102,7 +105,7 @@ See [macOS documentation](docs/macos.md) for build requirements and first-launch
 - Hover: view limit windows and reset times
 - Double-click: refresh immediately (Windows)
 - Right-click: refresh, change appearance, or quit
-- Appearance settings: resize from 50 to 300 px and choose a theme or custom color
+- Appearance settings: switch layouts, resize from 50 to 300 px, adjust meter widths from 2 to 14 px, and choose separate colors
 - Language setting: switch the orb, tooltip, menus, and settings between English and Chinese
 
 ## Repository Structure
@@ -127,7 +130,7 @@ codex-usage-orb/
 
 ## Building and Contributing
 
-Keep platform-specific code under `src/` and generated artifacts under `dist/`. Before submitting changes, build the affected platform and verify usage parsing, resizing, dragging, appearance persistence, and the unavailable-data state.
+Keep platform-specific code under `src/` and generated artifacts under `dist/`. Before submitting changes, build the affected platform and verify both usage windows, both layouts, resizing, dragging, appearance persistence, and unavailable-data states.
 
 ## License
 
