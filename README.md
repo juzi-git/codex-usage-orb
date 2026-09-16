@@ -17,7 +17,7 @@ A lightweight, draggable desktop orb that shows your remaining Codex usage at a 
 
 - Transparent, always-on-top desktop orb
 - Freely draggable with the mouse
-- Refreshes local Codex rate-limit data every 5 seconds
+- Refreshes the Codex account rate-limit snapshot about every 15 seconds
 - Animated liquid level and remaining percentage
 - Shows the 5-hour and weekly remaining allowances at the same time
 - Two switchable layouts: concentric rings or main value with a weekly arc
@@ -26,7 +26,7 @@ A lightweight, draggable desktop orb that shows your remaining Codex usage at a 
 - Independent 5-hour and weekly colors, each with presets and a custom color picker
 - English by default, with an English/Chinese language switch in settings
 - Persists the layout, size, meter widths, colors, language, and window position
-- Reads local data only and makes no network requests
+- Uses the local Codex app-server for current account data; the orb itself never handles credentials or sends requests directly
 
 ## Screenshots
 
@@ -55,16 +55,16 @@ The context-menu screenshot shows the default English interface. The other scree
 
 ## How It Works
 
-Codex writes structured rate-limit information to recent session files under its local data directory. The orb reads only the tail of the most recently updated session files and extracts the `rate_limits` field.
+The orb asks the locally installed Codex app-server for `account/rateLimits/read`, the same account-level source used by the Codex desktop client. If the CLI/app-server is unavailable, it falls back to parsing the tail of recent session files and extracts their `rate_limits` snapshots. The fallback can be older than the account panel, so the tooltip timestamp identifies when the displayed value was obtained.
 
-The 5-hour window is the primary value and the weekly window is shown as a secondary ring or arc. Windows are identified by their reported duration, with shortest/longest-window fallback handling if the field order changes.
+The 5-hour window is the primary value and the weekly window is shown as a secondary ring or arc. Windows are identified by their reported duration, with shortest/longest-window fallback handling if the field order changes. When Codex writes more than one rate-limit scope (for example, a model-specific weekly scope), the reader keeps scopes separate, prefers a scope that contains a 5-hour window, and merges the latest values for each window within that scope.
 
 ### Privacy
 
 - Does not read `auth.json`
 - Does not collect conversation content
-- Does not upload telemetry or usage data
-- Does not make network requests
+- Does not upload telemetry or usage data itself
+- Does not read or transmit credentials; the local Codex app-server performs any authenticated network request
 
 ## Quick Start
 
@@ -124,7 +124,7 @@ codex-usage-orb/
 
 ## Known Limitations
 
-- Usage updates depend on Codex writing a new local rate-limit status. The display is near-real-time rather than a direct account API feed.
+- Usage updates depend on the locally installed Codex app-server being available. If it cannot be started, the display falls back to the latest local session snapshot.
 - A future Codex update may change the local session format and require a parser update.
 - The macOS implementation must still be compiled and tested on a Mac.
 

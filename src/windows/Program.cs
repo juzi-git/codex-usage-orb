@@ -6,6 +6,8 @@ using System.Linq;
 using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Diagnostics;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -18,6 +20,50 @@ using ShapePath = System.Windows.Shapes.Path;
 
 namespace CodexUsageOrb
 {
+    internal static class OrbLogger
+    {
+        private static readonly object Sync = new object();
+        private static readonly string LogPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "CodexUsageOrb", "logs", "orb.log");
+
+        public static void Info(string message)
+        {
+            Write("INFO", message, null);
+        }
+
+        public static void Error(string message, Exception exception)
+        {
+            Write("ERROR", message, exception);
+        }
+
+        private static void Write(string level, string message, Exception exception)
+        {
+            try
+            {
+                string directory = Path.GetDirectoryName(LogPath);
+                if (!String.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
+                string detail = exception == null ? String.Empty : Environment.NewLine + exception;
+                string line = String.Format(
+                    CultureInfo.InvariantCulture,
+                    "{0:O} [{1}] {2}{3}{4}",
+                    DateTime.UtcNow,
+                    level,
+                    message,
+                    detail,
+                    Environment.NewLine);
+                lock (Sync)
+                {
+                    File.AppendAllText(LogPath, line, Encoding.UTF8);
+                }
+            }
+            catch
+            {
+                // Diagnostics must never become the reason the orb exits.
+            }
+        }
+    }
+
     internal sealed class LimitWindow
     {
         public double UsedPercent { get; set; }
@@ -32,6 +78,13 @@ namespace CodexUsageOrb
         public LimitWindow Primary { get; set; }
         public LimitWindow Secondary { get; set; }
         public string PlanType { get; set; }
+        public string LimitId { get; set; }
+        public string LimitName { get; set; }
+
+        public string ScopeKey
+        {
+            get { return (LimitId ?? String.Empty) + "\u001f" + (LimitName ?? String.Empty); }
+        }
 
         public IEnumerable<LimitWindow> Windows
         {
@@ -42,7 +95,14 @@ namespace CodexUsageOrb
             }
         }
 
-        public double RemainingPercent { get { return Windows.Min(x => x.RemainingPercent); } }
+        public double RemainingPercent
+        {
+            get
+            {
+                LimitWindow[] windows = Windows.ToArray();
+                return windows.Length == 0 ? 0 : windows.Min(x => x.RemainingPercent);
+            }
+        }
 
         public LimitWindow FiveHour
         {
@@ -81,17 +141,31 @@ namespace CodexUsageOrb
     }
 
     /// <summary>
-    /// Reads only the tail of recent Codex rollout files and extracts rate-limit fields.
-    /// It deliberately avoids auth.json and does not deserialize or retain conversation content.
+    /// Reads the account rate-limit snapshot from Codex app-server and falls
+    /// back to rollout files when the local CLI is unavailable.  Authentication
+    /// remains inside Codex; this process never opens auth.json.
     /// </summary>
-    internal sealed class CodexUsageReader
+    internal sealed class CodexUsageReader : IDisposable
     {
         private const int TailBytes = 1024 * 1024;
+        private const int CandidateFileCount = 32;
+        private const int AppServerTimeoutMilliseconds = 15000;
         private readonly string sessionsRoot;
+        private readonly object appServerLock = new object();
+        private Process appServerProcess;
+        private int nextAppServerRequestId = 2;
+        private bool appServerEverSucceeded;
         private static readonly Regex TimestampRegex = new Regex("\\\"timestamp\\\":\\\"(?<v>[^\\\"]+)\\\"", RegexOptions.Compiled);
         private static readonly Regex PlanRegex = new Regex("\\\"plan_type\\\":(?:null|\\\"(?<v>[^\\\"]+)\\\")", RegexOptions.Compiled);
+        private static readonly Regex LimitIdRegex = new Regex("\\\"limit_id\\\":(?:null|\\\"(?<v>[^\\\"]*)\\\")", RegexOptions.Compiled);
+        private static readonly Regex LimitNameRegex = new Regex("\\\"limit_name\\\":(?:null|\\\"(?<v>[^\\\"]*)\\\")", RegexOptions.Compiled);
         private static readonly Regex LimitRegex = new Regex(
             "\\\"(?<kind>primary|secondary)\\\":(?<null>null|\\{(?:(?!\\},\\\"(?:primary|secondary|credits|individual_limit|spend_control_reached|plan_type|rate_limit_reached_type)\\\").)*?\\\"used_percent\\\":(?<used>[0-9.]+),(?:(?!\\},\\\"(?:primary|secondary|credits|individual_limit|spend_control_reached|plan_type|rate_limit_reached_type)\\\").)*?\\\"window_minutes\\\":(?<minutes>[0-9]+),(?:(?!\\},\\\"(?:primary|secondary|credits|individual_limit|spend_control_reached|plan_type|rate_limit_reached_type)\\\").)*?\\\"resets_at\\\":(?<reset>[0-9]+)\\})",
+            RegexOptions.Compiled);
+        private static readonly Regex AppServerLimitIdRegex = new Regex("\\\"limitId\\\":(?:null|\\\"(?<v>[^\\\"]*)\\\")", RegexOptions.Compiled);
+        private static readonly Regex AppServerPlanRegex = new Regex("\\\"planType\\\":(?:null|\\\"(?<v>[^\\\"]+)\\\")", RegexOptions.Compiled);
+        private static readonly Regex AppServerWindowRegex = new Regex(
+            "\\\"(?<kind>primary|secondary)\\\":(?<null>null|\\{.*?\\\"usedPercent\\\":(?<used>[0-9.]+).*?\\\"windowDurationMins\\\":(?<minutes>[0-9]+).*?\\\"resetsAt\\\":(?<reset>[0-9]+).*?\\})",
             RegexOptions.Compiled);
 
         public CodexUsageReader()
@@ -102,6 +176,36 @@ namespace CodexUsageOrb
 
         public UsageSnapshot ReadLatest()
         {
+            try
+            {
+                UsageSnapshot appServerSnapshot = ReadFromAppServer();
+                if (appServerSnapshot != null)
+                {
+                    appServerEverSucceeded = true;
+                    return appServerSnapshot;
+                }
+
+                // Once the authoritative source has succeeded, do not replace it
+                // with an older JSONL snapshot during a transient RPC/network error.
+                return appServerEverSucceeded ? null : ReadFromSessionFiles();
+            }
+            catch (Exception exception)
+            {
+                OrbLogger.Error("用量读取失败，保留上一次有效数据", exception);
+                return null;
+            }
+        }
+
+        public void Dispose()
+        {
+            lock (appServerLock)
+            {
+                StopAppServer();
+            }
+        }
+
+        private UsageSnapshot ReadFromSessionFiles()
+        {
             if (!Directory.Exists(sessionsRoot)) return null;
 
             IEnumerable<FileInfo> candidates;
@@ -110,21 +214,219 @@ namespace CodexUsageOrb
                 candidates = new DirectoryInfo(sessionsRoot)
                     .EnumerateFiles("*.jsonl", SearchOption.AllDirectories)
                     .OrderByDescending(f => f.LastWriteTimeUtc)
-                    .Take(8)
+                    .Take(CandidateFileCount)
                     .ToArray();
             }
             catch (IOException) { return null; }
             catch (UnauthorizedAccessException) { return null; }
 
-            UsageSnapshot newest = null;
+            List<UsageSnapshot> parsedSnapshots = new List<UsageSnapshot>();
             foreach (FileInfo file in candidates)
             {
                 string tail = ReadTail(file.FullName);
                 if (String.IsNullOrEmpty(tail)) continue;
-                UsageSnapshot parsed = ParseLatest(tail);
-                if (parsed != null && (newest == null || parsed.TimestampUtc > newest.TimestampUtc)) newest = parsed;
+                parsedSnapshots.AddRange(ParseAll(tail));
             }
-            return newest;
+            return SelectBest(parsedSnapshots);
+        }
+
+        /// <summary>
+        /// Reads the same account/rateLimits endpoint used by the Codex desktop
+        /// client.  Session JSONL files are snapshots written during turns and
+        /// can be stale, so the app-server response is the authoritative source.
+        /// </summary>
+        private UsageSnapshot ReadFromAppServer()
+        {
+            lock (appServerLock)
+            {
+                if (!EnsureAppServer()) return null;
+
+                Process process = appServerProcess;
+                int requestId = nextAppServerRequestId++;
+                try
+                {
+                    process.StandardInput.WriteLine("{\"jsonrpc\":\"2.0\",\"id\":" + requestId + ",\"method\":\"account/rateLimits/read\",\"params\":{}}");
+                    process.StandardInput.Flush();
+
+                    Task<UsageSnapshot> responseTask = Task.Factory.StartNew(() =>
+                    {
+                        string line;
+                        while ((line = process.StandardOutput.ReadLine()) != null)
+                        {
+                            UsageSnapshot snapshot = ParseAppServerResponse(line);
+                            if (snapshot != null) return snapshot;
+                        }
+                        return null;
+                    });
+                    if (!responseTask.Wait(AppServerTimeoutMilliseconds))
+                    {
+                        StopAppServer();
+                        return null;
+                    }
+                    UsageSnapshot result = responseTask.Result;
+                    if (result == null) StopAppServer();
+                    return result;
+                }
+                catch (Exception)
+                {
+                    StopAppServer();
+                    return null;
+                }
+            }
+        }
+
+        private bool EnsureAppServer()
+        {
+            if (appServerProcess != null)
+            {
+                try
+                {
+                    if (!appServerProcess.HasExited) return true;
+                }
+                catch (Exception) { }
+                StopAppServer();
+            }
+
+            string executable = FindCodexExecutable();
+            if (String.IsNullOrEmpty(executable)) return false;
+            Process process = new Process
+            {
+                StartInfo = new ProcessStartInfo
+                {
+                    FileName = executable,
+                    Arguments = "app-server --analytics-default-enabled",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    WindowStyle = ProcessWindowStyle.Hidden,
+                    RedirectStandardInput = true,
+                    RedirectStandardOutput = true
+                }
+            };
+            try
+            {
+                if (!process.Start()) return false;
+                process.StandardInput.WriteLine("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"codex-usage-orb\",\"version\":\"1.0.0\"},\"capabilities\":{}}}");
+                process.StandardInput.WriteLine("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}");
+                process.StandardInput.Flush();
+                appServerProcess = process;
+                nextAppServerRequestId = 2;
+                return true;
+            }
+            catch (Exception)
+            {
+                try { process.Dispose(); } catch (Exception) { }
+                return false;
+            }
+        }
+
+        private void StopAppServer()
+        {
+            Process process = appServerProcess;
+            appServerProcess = null;
+            if (process == null) return;
+            try
+            {
+                if (!process.HasExited) process.Kill();
+            }
+            catch (Exception) { }
+            try { process.Dispose(); } catch (Exception) { }
+        }
+
+        private static UsageSnapshot ParseAppServerResponse(string line)
+        {
+            if (String.IsNullOrEmpty(line) || line.IndexOf("\"result\":", StringComparison.Ordinal) < 0 ||
+                line.IndexOf("\"rateLimits\":", StringComparison.Ordinal) < 0) return null;
+
+            string limitsBody = ExtractJsonObject(line, "\"rateLimits\":");
+            if (String.IsNullOrEmpty(limitsBody)) return null;
+            LimitWindow primary = null;
+            LimitWindow secondary = null;
+            foreach (Match match in AppServerWindowRegex.Matches(limitsBody))
+            {
+                if (match.Groups["null"].Value == "null") continue;
+                double used;
+                int minutes;
+                long reset;
+                if (!Double.TryParse(match.Groups["used"].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out used) ||
+                    !Int32.TryParse(match.Groups["minutes"].Value, out minutes) ||
+                    !Int64.TryParse(match.Groups["reset"].Value, out reset)) continue;
+                LimitWindow window = new LimitWindow { UsedPercent = used, WindowMinutes = minutes, ResetsAt = reset };
+                if (match.Groups["kind"].Value == "primary") primary = window; else secondary = window;
+            }
+            if (primary == null && secondary == null) return null;
+
+            Match id = AppServerLimitIdRegex.Match(limitsBody);
+            Match plan = AppServerPlanRegex.Match(limitsBody);
+            return new UsageSnapshot
+            {
+                TimestampUtc = DateTime.UtcNow,
+                Primary = primary,
+                Secondary = secondary,
+                PlanType = plan.Success && plan.Groups["v"].Success ? plan.Groups["v"].Value : null,
+                LimitId = id.Success && id.Groups["v"].Success ? id.Groups["v"].Value : null,
+                LimitName = null
+            };
+        }
+
+        private static string ExtractJsonObject(string text, string propertyMarker)
+        {
+            int marker = text.IndexOf(propertyMarker, StringComparison.Ordinal);
+            if (marker < 0) return null;
+            int start = text.IndexOf('{', marker + propertyMarker.Length);
+            if (start < 0) return null;
+
+            int depth = 0;
+            bool inString = false;
+            bool escaped = false;
+            for (int i = start; i < text.Length; i++)
+            {
+                char character = text[i];
+                if (inString)
+                {
+                    if (escaped) escaped = false;
+                    else if (character == '\\') escaped = true;
+                    else if (character == '\"') inString = false;
+                    continue;
+                }
+                if (character == '\"') { inString = true; continue; }
+                if (character == '{') depth++;
+                else if (character == '}' && --depth == 0) return text.Substring(start, i - start + 1);
+            }
+            return null;
+        }
+
+        private static string FindCodexExecutable()
+        {
+            string configured = Environment.GetEnvironmentVariable("CODEX_CLI_PATH");
+            if (!String.IsNullOrEmpty(configured) && File.Exists(configured)) return configured;
+
+            string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            string binRoot = Path.Combine(localAppData, "OpenAI", "Codex", "bin");
+            try
+            {
+                if (Directory.Exists(binRoot))
+                {
+                    string[] files = Directory.GetFiles(binRoot, "codex.exe", SearchOption.AllDirectories);
+                    string newest = files
+                        .OrderByDescending(path => File.GetLastWriteTimeUtc(path))
+                        .FirstOrDefault();
+                    if (!String.IsNullOrEmpty(newest)) return newest;
+                }
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+
+            string pathValue = Environment.GetEnvironmentVariable("PATH");
+            if (!String.IsNullOrEmpty(pathValue))
+            {
+                foreach (string directory in pathValue.Split(Path.PathSeparator))
+                {
+                    if (String.IsNullOrWhiteSpace(directory)) continue;
+                    string candidate = Path.Combine(directory.Trim(), "codex.exe");
+                    if (File.Exists(candidate)) return candidate;
+                }
+            }
+            return null;
         }
 
         private static string ReadTail(string path)
@@ -146,6 +448,12 @@ namespace CodexUsageOrb
 
         internal static UsageSnapshot ParseLatest(string text)
         {
+            return ParseAll(text).OrderByDescending(x => x.TimestampUtc).FirstOrDefault();
+        }
+
+        internal static List<UsageSnapshot> ParseAll(string text)
+        {
+            List<UsageSnapshot> results = new List<UsageSnapshot>();
             const string marker = "\"rate_limits\":";
             int cursor = text.LastIndexOf(marker, StringComparison.Ordinal);
             while (cursor >= 0)
@@ -155,11 +463,11 @@ namespace CodexUsageOrb
                 if (lineEnd < 0) lineEnd = text.Length;
                 string line = text.Substring(lineStart + 1, lineEnd - lineStart - 1);
                 UsageSnapshot result = ParseLine(line);
-                if (result != null) return result;
+                if (result != null) results.Add(result);
                 if (cursor == 0) break;
                 cursor = text.LastIndexOf(marker, cursor - 1, StringComparison.Ordinal);
             }
-            return null;
+            return results;
         }
 
         private static UsageSnapshot ParseLine(string line)
@@ -185,12 +493,58 @@ namespace CodexUsageOrb
             }
             if (primary == null && secondary == null) return null;
             Match pm = PlanRegex.Match(line);
+            Match lm = LimitIdRegex.Match(line);
+            Match lnm = LimitNameRegex.Match(line);
             return new UsageSnapshot
             {
                 TimestampUtc = timestamp,
                 Primary = primary,
                 Secondary = secondary,
-                PlanType = pm.Success ? pm.Groups["v"].Value : null
+                PlanType = pm.Success ? pm.Groups["v"].Value : null,
+                LimitId = lm.Success && lm.Groups["v"].Success ? lm.Groups["v"].Value : null,
+                LimitName = lnm.Success && lnm.Groups["v"].Success ? lnm.Groups["v"].Value : null
+            };
+        }
+
+        /// <summary>
+        /// Selects the rate-limit scope that represents the Codex allowance and merges
+        /// the newest value for each window. Model-specific scopes can omit the 5-hour
+        /// window, so they must not replace a scope that still reports both windows.
+        /// </summary>
+        private static UsageSnapshot SelectBest(IEnumerable<UsageSnapshot> records)
+        {
+            List<UsageSnapshot> snapshots = records == null ? new List<UsageSnapshot>() : records.ToList();
+            if (snapshots.Count == 0) return null;
+
+            var selectedScope = snapshots
+                .GroupBy(x => x.ScopeKey)
+                .Select(group => new
+                {
+                    Records = group.ToList(),
+                    HasFiveHour = group.Any(x => x.Windows.Any(w => w.WindowMinutes >= 280 && w.WindowMinutes <= 320)),
+                    Latest = group.Max(x => x.TimestampUtc)
+                })
+                .OrderByDescending(x => x.HasFiveHour)
+                .ThenByDescending(x => x.Latest)
+                .First();
+
+            UsageSnapshot latest = selectedScope.Records.OrderByDescending(x => x.TimestampUtc).First();
+            List<LimitWindow> windows = selectedScope.Records
+                .SelectMany(snapshot => snapshot.Windows.Select(window => new { snapshot.TimestampUtc, Window = window }))
+                .GroupBy(x => x.Window.WindowMinutes)
+                .Select(group => group.OrderByDescending(x => x.TimestampUtc).First().Window)
+                .OrderBy(x => x.WindowMinutes)
+                .Take(2)
+                .ToList();
+
+            return new UsageSnapshot
+            {
+                TimestampUtc = latest.TimestampUtc,
+                Primary = windows.Count > 0 ? windows[0] : null,
+                Secondary = windows.Count > 1 ? windows[1] : null,
+                PlanType = selectedScope.Records.Select(x => x.PlanType).FirstOrDefault(x => !String.IsNullOrEmpty(x)),
+                LimitId = latest.LimitId,
+                LimitName = latest.LimitName
             };
         }
     }
@@ -656,6 +1010,7 @@ namespace CodexUsageOrb
         private double displayedWeeklyArcWidth;
         private double phase;
         private bool refreshRunning;
+        private bool closing;
 
         public OrbWindow()
         {
@@ -761,8 +1116,16 @@ namespace CodexUsageOrb
                 settingsStore.Save(settings);
             };
             Loaded += OnLoaded;
+            Closed += delegate
+            {
+                closing = true;
+                refreshTimer.Stop();
+                waveTimer.Stop();
+                reader.Dispose();
+                OrbLogger.Info("悬浮球已关闭");
+            };
 
-            refreshTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
+            refreshTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(15) };
             refreshTimer.Tick += delegate { RefreshNow(); };
             waveTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(45) };
             waveTimer.Tick += delegate { phase += 0.10; DrawWaves(); };
@@ -826,13 +1189,32 @@ namespace CodexUsageOrb
 
         private async void RefreshNow()
         {
-            if (refreshRunning) return;
+            if (refreshRunning || closing) return;
             refreshRunning = true;
             try
             {
                 UsageSnapshot latest = await Task.Run(() => reader.ReadLatest());
+                if (closing) return;
                 if (latest != null) snapshot = latest;
                 UpdateDisplay();
+            }
+            catch (Exception exception)
+            {
+                OrbLogger.Error("刷新悬浮球失败", exception);
+                try
+                {
+                    if (!closing)
+                    {
+                        subtitleText.Text = Text(displayedLanguage, "Refresh failed", "刷新失败");
+                        detailTip.Content = Text(displayedLanguage,
+                            "Refresh failed. See the log for details.",
+                            "刷新失败，详细信息请查看日志。");
+                    }
+                }
+                catch (Exception displayException)
+                {
+                    OrbLogger.Error("显示刷新错误失败", displayException);
+                }
             }
             finally { refreshRunning = false; }
         }
@@ -879,23 +1261,38 @@ namespace CodexUsageOrb
             text.AppendLine(Text(language, "Codex remaining usage", "Codex 剩余用量"));
             foreach (LimitWindow window in value.Windows.OrderBy(x => x.WindowMinutes))
             {
-                DateTime reset = DateTimeOffset.FromUnixTimeSeconds(window.ResetsAt).LocalDateTime;
+                string reset = FormatResetTime(window.ResetsAt, language);
                 if (language == "zh")
                 {
                     text.Append(WindowName(window.WindowMinutes, language)).Append("：")
                         .Append(Math.Round(window.RemainingPercent).ToString("0", CultureInfo.InvariantCulture)).Append("%")
-                        .Append("（").Append(reset.ToString("M月d日 HH:mm")).AppendLine(" 重置）");
+                        .Append("（").Append(reset).AppendLine(" 重置）");
                 }
                 else
                 {
                     text.Append(WindowName(window.WindowMinutes, language)).Append(": ")
                         .Append(Math.Round(window.RemainingPercent).ToString("0", CultureInfo.InvariantCulture)).Append("%")
-                        .Append(" (resets ").Append(reset.ToString("MMM d, HH:mm", CultureInfo.InvariantCulture)).AppendLine(")");
+                        .Append(" (resets ").Append(reset).AppendLine(")");
                 }
             }
             if (!String.IsNullOrEmpty(value.PlanType)) text.AppendLine(Text(language, "Plan: ", "方案：") + value.PlanType);
             text.Append(Text(language, "Updated: ", "数据更新：")).Append(value.TimestampUtc.ToLocalTime().ToString("HH:mm:ss"));
             return text.ToString();
+        }
+
+        private static string FormatResetTime(long resetAt, string language)
+        {
+            try
+            {
+                DateTime reset = DateTimeOffset.FromUnixTimeSeconds(resetAt).LocalDateTime;
+                return language == "zh"
+                    ? reset.ToString("M月d日 HH:mm")
+                    : reset.ToString("MMM d, HH:mm", CultureInfo.InvariantCulture);
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+                return Text(language, "unknown", "未知");
+            }
         }
 
         private static string WindowName(int minutes, string language)
@@ -1157,8 +1554,40 @@ namespace CodexUsageOrb
         [STAThread]
         private static void Main()
         {
-            Application app = new Application { ShutdownMode = ShutdownMode.OnMainWindowClose };
-            app.Run(new OrbWindow());
+            bool createdNew;
+            using (Mutex singleInstance = new Mutex(true, @"Local\CodexUsageOrb", out createdNew))
+            {
+                if (!createdNew)
+                {
+                    OrbLogger.Info("检测到已有实例，忽略重复启动");
+                    return;
+                }
+
+                Application app = new Application { ShutdownMode = ShutdownMode.OnMainWindowClose };
+                app.DispatcherUnhandledException += delegate(object sender, System.Windows.Threading.DispatcherUnhandledExceptionEventArgs args)
+                {
+                    OrbLogger.Error("WPF 未处理异常", args.Exception);
+                    args.Handled = true;
+                };
+                AppDomain.CurrentDomain.UnhandledException += delegate(object sender, UnhandledExceptionEventArgs args)
+                {
+                    Exception exception = args.ExceptionObject as Exception;
+                    if (exception != null)
+                        OrbLogger.Error("应用域未处理异常", exception);
+                    else
+                        OrbLogger.Info("应用域未处理异常: " + String.Concat(args.ExceptionObject));
+                };
+
+                try
+                {
+                    OrbLogger.Info("悬浮球启动");
+                    app.Run(new OrbWindow());
+                }
+                catch (Exception exception)
+                {
+                    OrbLogger.Error("悬浮球启动失败", exception);
+                }
+            }
         }
     }
 }

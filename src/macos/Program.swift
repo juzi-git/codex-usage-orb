@@ -16,6 +16,12 @@ private struct UsageSnapshot {
     let primary: LimitWindow?
     let secondary: LimitWindow?
     let planType: String?
+    let limitID: String?
+    let limitName: String?
+
+    var scopeKey: String {
+        return "\(limitID ?? "")\u{1F}\(limitName ?? "")"
+    }
 
     var windows: [LimitWindow] {
         return [primary, secondary].compactMap { $0 }
@@ -51,14 +57,134 @@ private enum OrbStyle: String {
     }
 }
 
-/// Reads only the tail of recent Codex rollout files. Authentication data and
-/// conversation content are never retained or transmitted.
+/// Reads the account rate-limit snapshot from Codex app-server and falls back
+/// to rollout files. Authentication data and conversation content are never
+/// retained or transmitted by the orb.
 private final class CodexUsageReader {
     private let sessionsURL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".codex/sessions", isDirectory: true)
     private let tailBytes: UInt64 = 1_048_576
+    private let candidateFileCount = 32
+    private let appServerTimeout: TimeInterval = 15
+    private var appServerEverSucceeded = false
 
     func readLatest() -> UsageSnapshot? {
+        if let snapshot = readFromAppServer() {
+            appServerEverSucceeded = true
+            return snapshot
+        }
+        if appServerEverSucceeded { return nil }
+
+        return readFromSessionFiles()
+    }
+
+    /// Reads the same account/rateLimits endpoint used by the Codex desktop
+    /// client. Rollout JSONL records are retained as a compatibility fallback,
+    /// but they are snapshots from individual turns and may be stale.
+    private func readFromAppServer() -> UsageSnapshot? {
+        guard let executable = findCodexExecutable() else { return nil }
+
+        let process = Process()
+        let input = Pipe()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = ["app-server", "--analytics-default-enabled"]
+        process.standardInput = input
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+
+        do { try process.run() } catch { return nil }
+        let requests = """
+        {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"codex-usage-orb","version":"1.0.0"},"capabilities":{}}}
+        {"jsonrpc":"2.0","method":"initialized","params":{}}
+        {"jsonrpc":"2.0","id":2,"method":"account/rateLimits/read","params":{}}
+        """
+        input.fileHandleForWriting.write(Data(requests.utf8))
+
+        let lock = NSLock()
+        let finished = DispatchSemaphore(value: 0)
+        var buffer = Data()
+        var result: UsageSnapshot?
+        output.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if data.isEmpty { finished.signal(); return }
+            lock.lock()
+            buffer.append(data)
+            while let newline = buffer.firstIndex(of: 10) {
+                let lineData = buffer.subdata(in: buffer.startIndex..<newline)
+                buffer.removeSubrange(buffer.startIndex...newline)
+                if let line = String(data: lineData, encoding: .utf8),
+                   let parsed = self.parseAppServerResponse(line) {
+                    result = parsed
+                    finished.signal()
+                    break
+                }
+            }
+            lock.unlock()
+        }
+
+        let waitResult = finished.wait(timeout: .now() + appServerTimeout)
+        output.fileHandleForReading.readabilityHandler = nil
+        if process.isRunning { process.terminate() }
+        process.waitUntilExit()
+        lock.lock()
+        let snapshot = result
+        lock.unlock()
+        return waitResult == .success ? snapshot : nil
+    }
+
+    private func parseAppServerResponse(_ line: String) -> UsageSnapshot? {
+        guard let data = line.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let root = object as? [String: Any],
+              let result = root["result"] as? [String: Any],
+              let rateLimits = result["rateLimits"] as? [String: Any] else { return nil }
+
+        let primary = parseAppServerWindow(rateLimits["primary"])
+        let secondary = parseAppServerWindow(rateLimits["secondary"])
+        guard primary != nil || secondary != nil else { return nil }
+        return UsageSnapshot(
+            timestamp: Date(),
+            primary: primary,
+            secondary: secondary,
+            planType: rateLimits["planType"] as? String,
+            limitID: rateLimits["limitId"] as? String,
+            limitName: rateLimits["limitName"] as? String
+        )
+    }
+
+    private func parseAppServerWindow(_ value: Any?) -> LimitWindow? {
+        guard let object = value as? [String: Any],
+              let used = object["usedPercent"] as? NSNumber,
+              let minutes = object["windowDurationMins"] as? NSNumber,
+              let reset = object["resetsAt"] as? NSNumber else { return nil }
+        return LimitWindow(
+            usedPercent: used.doubleValue,
+            windowMinutes: minutes.intValue,
+            resetsAt: reset.doubleValue
+        )
+    }
+
+    private func findCodexExecutable() -> String? {
+        let environment = ProcessInfo.processInfo.environment
+        if let configured = environment["CODEX_CLI_PATH"], FileManager.default.isExecutableFile(atPath: configured) {
+            return configured
+        }
+
+        var candidates = [
+            "/usr/local/bin/codex",
+            "/opt/homebrew/bin/codex",
+            NSHomeDirectory() + "/.local/bin/codex",
+            "/Applications/Codex.app/Contents/Resources/codex",
+            "/Applications/Codex.app/Contents/MacOS/codex"
+        ]
+        if let path = environment["PATH"] {
+            candidates.append(contentsOf: path.split(separator: ":").map { String($0) + "/codex" })
+        }
+        return candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) })
+    }
+
+    private func readFromSessionFiles() -> UsageSnapshot? {
         let manager = FileManager.default
         guard let enumerator = manager.enumerator(
             at: sessionsURL,
@@ -73,28 +199,29 @@ private final class CodexUsageReader {
             candidates.append((url, values.contentModificationDate ?? .distantPast))
         }
 
-        return candidates
+        let records = candidates
             .sorted { $0.modified > $1.modified }
-            .prefix(8)
-            .compactMap { parseLatest(in: $0.url) }
-            .max { $0.timestamp < $1.timestamp }
+            .prefix(candidateFileCount)
+            .flatMap { parseAll(in: $0.url) }
+        return selectBest(records)
     }
 
-    private func parseLatest(in url: URL) -> UsageSnapshot? {
-        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+    private func parseAll(in url: URL) -> [UsageSnapshot] {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return [] }
         defer { try? handle.close() }
 
-        guard let length = try? handle.seekToEnd() else { return nil }
+        guard let length = try? handle.seekToEnd() else { return [] }
         let start = length > tailBytes ? length - tailBytes : 0
         try? handle.seek(toOffset: start)
         guard let data = try? handle.readToEnd(),
-              let text = String(data: data, encoding: .utf8) else { return nil }
+              let text = String(data: data, encoding: .utf8) else { return [] }
 
+        var results: [UsageSnapshot] = []
         for line in text.split(separator: "\n", omittingEmptySubsequences: true).reversed() {
             guard line.contains("\"rate_limits\"") else { continue }
-            if let snapshot = parseLine(Data(line.utf8)) { return snapshot }
+            if let snapshot = parseLine(Data(line.utf8)) { results.append(snapshot) }
         }
-        return nil
+        return results
     }
 
     private func parseLine(_ data: Data) -> UsageSnapshot? {
@@ -114,7 +241,40 @@ private final class CodexUsageReader {
             timestamp: timestamp,
             primary: primary,
             secondary: secondary,
-            planType: rateLimits["plan_type"] as? String
+            planType: rateLimits["plan_type"] as? String,
+            limitID: rateLimits["limit_id"] as? String,
+            limitName: rateLimits["limit_name"] as? String
+        )
+    }
+
+    /// Selects a scope containing the 5-hour window when available and merges the
+    /// newest value for each window so split rate-limit events remain complete.
+    private func selectBest(_ records: [UsageSnapshot]) -> UsageSnapshot? {
+        guard !records.isEmpty else { return nil }
+        let groups = Dictionary(grouping: records, by: { $0.scopeKey })
+        guard let selected = groups.values.max(by: { left, right in
+            let leftHasFiveHour = left.contains { snapshot in snapshot.windows.contains { (280...320).contains($0.windowMinutes) } }
+            let rightHasFiveHour = right.contains { snapshot in snapshot.windows.contains { (280...320).contains($0.windowMinutes) } }
+            if leftHasFiveHour != rightHasFiveHour { return !leftHasFiveHour && rightHasFiveHour }
+            return (left.map(\.timestamp).max() ?? .distantPast) < (right.map(\.timestamp).max() ?? .distantPast)
+        }) else { return nil }
+
+        let latest = selected.max { $0.timestamp < $1.timestamp }!
+        var latestByMinutes: [Int: (window: LimitWindow, timestamp: Date)] = [:]
+        for snapshot in selected {
+            for window in snapshot.windows {
+                if let current = latestByMinutes[window.windowMinutes], current.timestamp >= snapshot.timestamp { continue }
+                latestByMinutes[window.windowMinutes] = (window, snapshot.timestamp)
+            }
+        }
+        let windows = latestByMinutes.values.sorted { $0.window.windowMinutes < $1.window.windowMinutes }.prefix(2).map { $0.window }
+        return UsageSnapshot(
+            timestamp: latest.timestamp,
+            primary: windows.first,
+            secondary: windows.dropFirst().first,
+            planType: selected.compactMap(\.planType).first,
+            limitID: latest.limitID,
+            limitName: latest.limitName
         )
     }
 
@@ -620,7 +780,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         panel.orderFrontRegardless()
 
         refresh()
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in self?.refresh() }
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in self?.refresh() }
     }
 
     func applicationWillTerminate(_ notification: Notification) {

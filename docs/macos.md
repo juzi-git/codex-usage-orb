@@ -54,4 +54,4 @@ The build script creates a locally built, unsigned application. If macOS blocks 
 
 ## Appearance
 
-The macOS version shows the 5-hour and weekly allowances together and can switch between **Concentric rings** and **Main value + weekly arc**. It supports sizes from 50 to 300 px, independent concentric-ring and weekly-arc widths from 2 to 14 px, independent colors for both meters, four presets plus the system color picker for each meter, and persistent layout, size, widths, colors, language, and window position. English and concentric rings are used by default.
+The macOS version shows the 5-hour and weekly allowances together and can switch between **Concentric rings** and **Main value + weekly arc**. It supports sizes from 50 to 300 px, independent concentric-ring and weekly-arc widths from 2 to 14 px, independent colors for both meters, four presets plus the system color picker for each meter, and persistent layout, size, widths, colors, language, and window position. The reader first calls the local Codex app-server `account/rateLimits/read` and falls back to session snapshots if the CLI is unavailable. English and concentric rings are used by default.

@@ -5,7 +5,7 @@ The Windows version is a lightweight WPF application that uses the .NET Framewor
 ## Requirements
 
 - Windows 10 or 11
-- Codex desktop app or Codex CLI installed and authenticated with a ChatGPT account
+- Codex desktop app or Codex CLI installed and authenticated with a ChatGPT account (the CLI is used to access the local app-server)
 - .NET Framework 4.x system assemblies
 
 ## Build
@@ -59,4 +59,12 @@ The layout, size, both meter widths, both meter colors, language, and position a
 
 ## Troubleshooting
 
-If the orb displays `--`, complete at least one Codex conversation so Codex can write an up-to-date usage status. If the value remains unavailable after a Codex update, the local session format may have changed.
+The orb first calls the local Codex app-server `account/rateLimits/read`, which is the account-level source used by the Codex desktop client. If that process cannot start or the request times out, the reader falls back to recent session-file snapshots and keeps a successful app-server value instead of replacing it with an older fallback.
+
+If the orb displays `--`, verify that `codex.exe` is installed under `%LOCALAPPDATA%\OpenAI\Codex\bin` or set `CODEX_CLI_PATH` to its full path, then use **Refresh now**. The reader still separates multiple rate-limit scopes and supports the legacy `rate_limits` session format as a fallback.
+
+The Windows build uses a named single-instance lock, so starting the executable repeatedly will not create additional orbs. If an older build left several processes running, close the old `CodexUsageOrb.exe` processes once in Task Manager (or run `Get-Process CodexUsageOrb | Stop-Process`) before starting the rebuilt version. Refresh and rendering exceptions are kept in:
+
+```text
+%LOCALAPPDATA%\CodexUsageOrb\logs\orb.log
+```
